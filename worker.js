@@ -163,10 +163,11 @@ export default {
           return new Response('Forbidden', { status: 403 });
         }
         const update = await request.json();
-        // 首次请求时从KV加载数据
-        ctx.waitUntil(loadFromKV(env));
-        // 异步处理，不阻塞响应
-        ctx.waitUntil(handleUpdate(update, env, ctx));
+        // 先加载KV数据，再处理消息（确保先后顺序）
+        ctx.waitUntil((async () => {
+          await loadFromKV(env);
+          await handleUpdate(update, env, ctx);
+        })());
       } catch (e) {
         console.error('处理更新出错:', e);
       }
@@ -274,8 +275,8 @@ async function handleUpdate(update, env, ctx) {
       }
 
       // ====== 记录用户信息到 KV（如果配置了 USER_KV 存储）======
-      if (env.USER_KV) {
-        ctx.waitUntil(recordUser(env, userId, {
+            if (env.USER_KV) {
+        await recordUser(env, userId, {
           id: userId,
           first_name: msg.from.first_name,
           last_name: msg.from.last_name,
@@ -553,8 +554,8 @@ async function handleHumanVerification(msg, env, ctx) {
       // 直接通过验证（是真人发命令的行为）
       verifiedUsers.add(userId);
       pendingVerification.delete(userId);
-      ctx.waitUntil(saveVerifiedToKV(env));
-      ctx.waitUntil(savePendingToKV(env));
+      await saveVerifiedToKV(env);
+      await savePendingToKV(env);
       await sendMessage(env, userId, '✅ 验证通过！现在你可以发送消息给管理员了。');
       // 顺便处理命令
       if (msg.text === '/start') {
@@ -583,8 +584,8 @@ async function handleHumanVerification(msg, env, ctx) {
       // 验证通过
       verifiedUsers.add(userId);
       pendingVerification.delete(userId);
-      ctx.waitUntil(saveVerifiedToKV(env));
-      ctx.waitUntil(savePendingToKV(env));
+            await saveVerifiedToKV(env);
+      await savePendingToKV(env);
       await sendMessage(env, userId, '✅ 验证通过！现在你可以发送消息给管理员了。');
       return;
     }
@@ -595,8 +596,8 @@ async function handleHumanVerification(msg, env, ctx) {
       // 3次错误，封禁
       blockedUsers.add(userId);
       pendingVerification.delete(userId);
-      ctx.waitUntil(saveBlockedToKV(env));
-      ctx.waitUntil(savePendingToKV(env));
+      await saveBlockedToKV(env);
+      await savePendingToKV(env);
       await sendMessage(env, userId, '❌ 验证失败次数过多，你已被禁止使用此机器人。');
       return;
     }
@@ -613,7 +614,7 @@ async function handleHumanVerification(msg, env, ctx) {
     question: question.q,
   });
 
-  ctx.waitUntil(savePendingToKV(env));
+    await savePendingToKV(env);
 
   await sendMessage(
     env,
@@ -692,8 +693,8 @@ async function handleAdminCommand(msg, env, ctx) {
         await sendMessage(env, env.ADMIN_ID, '❌ 不能封禁管理员自己');
         return;
       }
-      blockedUsers.add(targetId);
-      ctx.waitUntil(saveBlockedToKV(env));
+            blockedUsers.add(targetId);
+      await saveBlockedToKV(env);
       await sendMessage(env, env.ADMIN_ID, `🔨 已封禁用户 #${targetId}`);
       break;
     }
@@ -704,8 +705,8 @@ async function handleAdminCommand(msg, env, ctx) {
         await sendMessage(env, env.ADMIN_ID, '❌ 用法: /unblock <用户ID>');
         return;
       }
-      blockedUsers.delete(targetId);
-      ctx.waitUntil(saveBlockedToKV(env));
+            blockedUsers.delete(targetId);
+      await saveBlockedToKV(env);
       await sendMessage(env, env.ADMIN_ID, `✅ 已解封用户 #${targetId}`);
       break;
     }
@@ -726,8 +727,8 @@ async function handleAdminCommand(msg, env, ctx) {
         await sendMessage(env, env.ADMIN_ID, '❌ 用法: /addkw <关键词>');
         return;
       }
-      bannedKeywords.add(kw);
-      ctx.waitUntil(saveKeywordsToKV(env));
+            bannedKeywords.add(kw);
+      await saveKeywordsToKV(env);
       await sendMessage(env, env.ADMIN_ID, `✅ 已添加敏感词: ${escapeHtml(kw)}`);
       break;
     }
@@ -742,8 +743,8 @@ async function handleAdminCommand(msg, env, ctx) {
         await sendMessage(env, env.ADMIN_ID, `❌ 敏感词不存在: ${escapeHtml(kw)}`);
         return;
       }
-      bannedKeywords.delete(kw);
-      ctx.waitUntil(saveKeywordsToKV(env));
+            bannedKeywords.delete(kw);
+      await saveKeywordsToKV(env);
       await sendMessage(env, env.ADMIN_ID, `✅ 已删除敏感词: ${escapeHtml(kw)}`);
       break;
     }
@@ -760,13 +761,13 @@ async function handleAdminCommand(msg, env, ctx) {
 
     case '/kwmode': {
       const mode = args[0];
-      if (mode === 'block') {
+            if (mode === 'block') {
         keywordAction = 'block';
-        ctx.waitUntil(saveKwActionToKV(env));
+        await saveKwActionToKV(env);
         await sendMessage(env, env.ADMIN_ID, '🔨 关键词模式已切换为: 拦截（命中直接拦截）');
       } else if (mode === 'warn') {
         keywordAction = 'warn';
-        ctx.waitUntil(saveKwActionToKV(env));
+        await saveKwActionToKV(env);
         await sendMessage(env, env.ADMIN_ID, '⚠️ 关键词模式已切换为: 警告（命中仍转发，附标记）');
       } else {
         await sendMessage(env, env.ADMIN_ID, '❌ 用法: /kwmode <block|warn>');
