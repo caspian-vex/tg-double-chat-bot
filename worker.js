@@ -15,6 +15,45 @@
 // 消息ID → { userId, username } 映射表（用于精确匹配回复目标）
 const messageUserMap = new Map();
 
+// ====== 安全防护 ======
+const blockedUsers = new Set();        // 被封禁的用户ID
+const verifiedUsers = new Set();       // 已通过真人验证的用户ID
+const pendingVerification = new Map(); // userId → { answer, attempts }
+const bannedKeywords = new Set([    // 敏感关键词列表
+  '加群',
+  '进群',
+  '推广',
+  '广告',
+  '返利',
+  '博彩',
+  '代投',
+  '套利',
+  'USDT',
+  'BTC',
+  'ETH',
+  '币圈',
+  '空投',
+  '交易所',
+  '稳赚',
+  '客服',
+  '开户链接',
+  '刷单',
+  '兼职',
+  '日赚',
+  '高回报',
+  '零风险',
+  '投资',
+  '理财',
+  '赚钱',
+  '引流',
+  '群发',
+  '频道',
+  '中间商',
+  '交流群',
+  '介绍',
+]);
+let keywordAction = 'block';        // 'block'=拦截, 'warn'=警告+转发
+
 
 export default {
   async fetch(request, env, ctx) {
@@ -152,7 +191,20 @@ async function handleUpdate(update, env, ctx) {
     if (isAdmin) {
       await handleAdminMessage(msg, env);
     } else {
-      // 记录用户信息到 KV（如果配置了 USER_KV 存储）
+      // ====== 安全验证 ======
+
+      // 1. 封禁检查
+      if (blockedUsers.has(userId)) {
+        return;
+      }
+
+      // 2. 真人验证
+      if (!verifiedUsers.has(userId)) {
+        await handleHumanVerification(msg, env);
+        return;
+      }
+
+      // ====== 记录用户信息到 KV（如果配置了 USER_KV 存储）======
       if (env.USER_KV) {
         ctx.waitUntil(recordUser(env, userId, {
           id: userId,
@@ -200,7 +252,7 @@ async function handleUserMessage(msg, env) {
     `📅 ${new Date().toLocaleString('zh-CN')}\n` +
     `──────────────────`;
 
-  // 根据消息类型转发给管理员
+  // 只处理文字消息
   try {
     if (msg.text) {
       // 处理命令
@@ -208,61 +260,31 @@ async function handleUserMessage(msg, env) {
         await handleUserCommand(msg, env);
         return;
       }
+
+      // 关键词拦截
+      if (bannedKeywords.size > 0) {
+        const matchedKeyword = checkBannedKeywords(msg.text);
+        if (matchedKeyword) {
+          if (keywordAction === 'block') {
+            await sendMessage(env, userId, '⚠️ 消息包含敏感内容，已被拦截。');
+            return;
+          } else {
+            // warn 模式：转发并标记
+            const text = `${header}\n\n⚠️ 敏感词触发: ${escapeHtml(matchedKeyword)}\n──────────────────\n${escapeHtml(msg.text)}`;
+            await sendReplyMarkup(env, env.ADMIN_ID, text, userId, username);
+            await sendMessage(env, userId, '✅ 消息已发送给管理员，请等待回复~');
+            return;
+          }
+        }
+      }
+
       const text = `${header}\n\n${escapeHtml(msg.text)}`;
       await sendReplyMarkup(env, env.ADMIN_ID, text, userId, username);
-    } else if (msg.photo) {
-      const fileId = msg.photo[msg.photo.length - 1].file_id;
-      const caption = msg.caption
-        ? `${header}\n\n${escapeHtml(msg.caption)}`
-        : header;
-      await sendPhotoWithReply(env, env.ADMIN_ID, fileId, caption, userId, username);
-    } else if (msg.video) {
-      const text = msg.caption
-        ? `${header}\n\n${escapeHtml(msg.caption)}`
-        : header;
-      await sendVideoWithReply(env, env.ADMIN_ID, msg.video.file_id, text, userId, username);
-    } else if (msg.document) {
-      const text = msg.caption
-        ? `${header}\n\n${escapeHtml(msg.caption)}`
-        : header;
-      await sendDocumentWithReply(env, env.ADMIN_ID, msg.document.file_id, text, userId, username);
-    } else if (msg.audio) {
-      const text = msg.caption
-        ? `${header}\n\n${escapeHtml(msg.caption)}`
-        : header;
-      await sendAudioWithReply(env, env.ADMIN_ID, msg.audio.file_id, text, userId, username);
-    } else if (msg.voice) {
-      await sendVoiceWithReply(env, env.ADMIN_ID, msg.voice.file_id, header, userId, username);
-    } else if (msg.sticker) {
-      await sendSticker(env, env.ADMIN_ID, msg.sticker.file_id);
-      // 同时发一条文字说明
-      await sendReplyMarkup(env, env.ADMIN_ID, header, userId, username);
-    } else if (msg.animation) {
-      const text = msg.caption
-        ? `${header}\n\n${escapeHtml(msg.caption)}`
-        : header;
-      await sendAnimationWithReply(env, env.ADMIN_ID, msg.animation.file_id, text, userId, username);
-    } else if (msg.video_note) {
-      await sendVideoNote(env, env.ADMIN_ID, msg.video_note.file_id);
-      await sendReplyMarkup(env, env.ADMIN_ID, header, userId, username);
-    } else if (msg.location) {
-      const loc = msg.location;
-      const text =
-        `${header}\n\n📍 位置信息\n经度: ${loc.longitude}\n纬度: ${loc.latitude}`;
-      await sendReplyMarkup(env, env.ADMIN_ID, text, userId, username);
-      await sendLocation(env, env.ADMIN_ID, loc.latitude, loc.longitude);
-    } else if (msg.contact) {
-      const c = msg.contact;
-      const text =
-        `${header}\n\n📇 名片\n姓名: ${c.first_name} ${c.last_name || ''}\n电话: ${c.phone_number}`;
-      await sendReplyMarkup(env, env.ADMIN_ID, text, userId, username);
+      await sendMessage(env, userId, '✅ 消息已发送给管理员，请等待回复~');
     } else {
-      // 不支持的消息类型
-      await sendReplyMarkup(env, env.ADMIN_ID, `${header}\n\n⚠️ 用户发送了不支持的消息类型`, userId, username);
+      // 非文字消息暂不支持
+      await sendMessage(env, userId, '⚠️ 目前仅支持文字消息，请发送文字。');
     }
-
-    // 通知用户消息已发送
-    await sendMessage(env, userId, '✅ 消息已发送给管理员，请等待回复~');
   } catch (e) {
     console.error('转发用户消息失败:', e);
   }
@@ -281,7 +303,7 @@ async function handleUserCommand(msg, env) {
         `👋 你好！我是双向私聊机器人。\n\n` +
         `📝 直接发送消息给我，我会转发给管理员。\n` +
         `⏳ 管理员回复后，我会第一时间转发给你。\n\n` +
-        `✨ 支持文字、图片、视频、文件、语音等多种消息类型。`
+        `📝 目前仅支持文字消息。`
       );
       break;
     case '/help':
@@ -289,15 +311,8 @@ async function handleUserCommand(msg, env) {
         env,
         msg.chat.id,
         `💡 使用说明\n\n` +
-        `直接发送消息即可，管理员会收到并回复你。\n\n` +
-        `支持的格式：\n` +
-        `• 文字消息\n` +
-        `• 图片 (带说明文字)\n` +
-        `• 视频 / 短视频\n` +
-        `• 文件 / 压缩包\n` +
-        `• 语音 / 音乐\n` +
-        `• 贴纸 / GIF\n` +
-        `• 位置 / 名片`
+        `直接发送文字消息即可，管理员会收到并回复你。\n\n` +
+        `📝 目前仅支持文字消息。`
       );
       break;
     default:
@@ -433,6 +448,98 @@ function extractUsername(message) {
   return '';
 }
 
+// ===================== 真人验证 =====================
+
+const VERIFY_QUESTIONS = [
+  { q: '1 加 1 = ?', a: '2' },
+  { q: '5 加 3 = ?', a: '8' },
+  { q: '10 减 4 = ?', a: '6' },
+  { q: '7 加 8 = ?', a: '15' },
+  { q: '20 除 4 = ?', a: '5' },
+  { q: '3 乘 3 = ?', a: '9' },
+  { q: '12 加 15 = ?', a: '27' },
+  { q: '100 减 25 = ?', a: '75' },
+  { q: '6 乘 7 = ?', a: '42' },
+  { q: '9 加 6 = ?', a: '15' },
+  { q: '30 除 5 = ?', a: '6' },
+  { q: '4 乘 8 = ?', a: '32' },
+];
+
+async function handleHumanVerification(msg, env) {
+  const userId = msg.from.id;
+
+  // 如果用户正处在验证流程中，检查回答
+  if (pendingVerification.has(userId)) {
+    const verify = pendingVerification.get(userId);
+
+    // 检查是不是 /start 或 /help
+    if (msg.text && (msg.text === '/start' || msg.text === '/help')) {
+      // 直接通过验证（是真人发命令的行为）
+      verifiedUsers.add(userId);
+      pendingVerification.delete(userId);
+      await sendMessage(env, userId, '✅ 验证通过！现在你可以发送消息给管理员了。');
+      // 顺便处理命令
+      if (msg.text === '/start') {
+        await sendMessage(
+          env,
+          userId,
+          `👋 你好！我是双向私聊机器人。\n\n` +
+          `📝 直接发送消息给我，我会转发给管理员。\n` +
+          `⏳ 管理员回复后，我会第一时间转发给你。\n\n` +
+          `📝 目前仅支持文字消息。`
+        );
+      } else {
+        await sendMessage(
+          env,
+          userId,
+          `💡 使用说明\n\n` +
+          `直接发送文字消息即可，管理员会收到并回复你。\n\n` +
+          `📝 目前仅支持文字消息。`
+        );
+      }
+      return;
+    }
+
+    // 检查回答是否正确
+    if (msg.text && msg.text.trim() === verify.answer) {
+      // 验证通过
+      verifiedUsers.add(userId);
+      pendingVerification.delete(userId);
+      await sendMessage(env, userId, '✅ 验证通过！现在你可以发送消息给管理员了。');
+      return;
+    }
+
+    // 回答错误
+    verify.attempts++;
+    if (verify.attempts >= 3) {
+      // 3次错误，封禁
+      blockedUsers.add(userId);
+      pendingVerification.delete(userId);
+      await sendMessage(env, userId, '❌ 验证失败次数过多，你已被禁止使用此机器人。');
+      return;
+    }
+
+    await sendMessage(env, userId, `❌ 答案不对，再试试！(${verify.attempts}/3)\n\n🧮 问题是: ${verify.question}`);
+    return;
+  }
+
+  // 首次验证：生成随机题目
+  const question = VERIFY_QUESTIONS[Math.floor(Math.random() * VERIFY_QUESTIONS.length)];
+  pendingVerification.set(userId, {
+    answer: question.a,
+    attempts: 0,
+    question: question.q,
+  });
+
+  await sendMessage(
+    env,
+    userId,
+    `🧮 请回答验证问题以证明你是真人:\n\n` +
+    `${question.q}\n\n` +
+    `你有 3 次机会。回答正确后即可使用机器人。`
+  );
+}
+
 /**
  * 处理管理员命令
  */
@@ -452,7 +559,9 @@ async function handleAdminCommand(msg, env) {
         `• 支持文字/图片/视频/文件等\n\n` +
         `📋 可用命令:\n` +
         `/stats - 查看统计\n` +
-        `/broadcast <内容> - 广播消息给所有用户\n` +
+        `/block <ID> - 封禁用户\n` +
+        `/unblock <ID> - 解封用户\n` +
+        `/blocklist - 查看封禁列表\n` +
         `/help - 帮助`
       );
       break;
@@ -463,7 +572,13 @@ async function handleAdminCommand(msg, env) {
         env.ADMIN_ID,
         `📋 管理员命令:\n\n` +
         `/stats - 查看机器人统计信息\n` +
-        `/broadcast <消息> - 向所有联系过的用户群发\n` +
+        `/block <ID> - 🔨 封禁指定用户\n` +
+        `/unblock <ID> - ✅ 解封指定用户\n` +
+        `/blocklist - 📋 查看封禁列表\n` +
+        `/addkw <词> - 添加敏感词\n` +
+        `/delkw <词> - 删除敏感词\n` +
+        `/kwlist - 查看敏感词列表\n` +
+        `/kwmode <block|warn> - 拦截/警告模式\n` +
         `/help - 显示此帮助\n\n` +
         `💡 回复任意用户消息即可回复该用户。`
       );
@@ -483,23 +598,89 @@ async function handleAdminCommand(msg, env) {
       );
       break;
 
-    case '/broadcast': {
-      if (!env.USER_KV) {
-        await sendMessage(env, env.ADMIN_ID, '❌ 广播功能需要配置 KV 命名空间 (USER_KV)');
+    case '/block': {
+      const targetId = parseInt(args[0]);
+      if (!targetId || isNaN(targetId)) {
+        await sendMessage(env, env.ADMIN_ID, '❌ 用法: /block <用户ID>');
         return;
       }
-      const broadcastText = args.join(' ');
-      if (!broadcastText) {
-        await sendMessage(env, env.ADMIN_ID, '❌ 请提供广播内容: /broadcast <消息>');
+      if (targetId == env.ADMIN_ID) {
+        await sendMessage(env, env.ADMIN_ID, '❌ 不能封禁管理员自己');
         return;
       }
-      await sendMessage(env, env.ADMIN_ID, '📢 广播发送中...');
-      const { success, fail } = await broadcastToUsers(env, broadcastText);
-      await sendMessage(
-        env,
-        env.ADMIN_ID,
-        `📢 广播完成\n✅ 成功: ${success}\n❌ 失败: ${fail}`
-      );
+      blockedUsers.add(targetId);
+      await sendMessage(env, env.ADMIN_ID, `🔨 已封禁用户 #${targetId}`);
+      break;
+    }
+
+    case '/unblock': {
+      const targetId = parseInt(args[0]);
+      if (!targetId || isNaN(targetId)) {
+        await sendMessage(env, env.ADMIN_ID, '❌ 用法: /unblock <用户ID>');
+        return;
+      }
+      blockedUsers.delete(targetId);
+      await sendMessage(env, env.ADMIN_ID, `✅ 已解封用户 #${targetId}`);
+      break;
+    }
+
+    case '/blocklist': {
+      if (blockedUsers.size === 0) {
+        await sendMessage(env, env.ADMIN_ID, '📋 封禁列表为空，目前没有封禁任何用户。');
+        return;
+      }
+      const list = Array.from(blockedUsers).join('\n• #');
+      await sendMessage(env, env.ADMIN_ID, `📋 被封禁用户:\n• #${list}`);
+      break;
+    }
+
+    case '/addkw': {
+      const kw = args.join(' ');
+      if (!kw) {
+        await sendMessage(env, env.ADMIN_ID, '❌ 用法: /addkw <关键词>');
+        return;
+      }
+      bannedKeywords.add(kw);
+      await sendMessage(env, env.ADMIN_ID, `✅ 已添加敏感词: ${escapeHtml(kw)}`);
+      break;
+    }
+
+    case '/delkw': {
+      const kw = args.join(' ');
+      if (!kw) {
+        await sendMessage(env, env.ADMIN_ID, '❌ 用法: /delkw <关键词>');
+        return;
+      }
+      if (!bannedKeywords.has(kw)) {
+        await sendMessage(env, env.ADMIN_ID, `❌ 敏感词不存在: ${escapeHtml(kw)}`);
+        return;
+      }
+      bannedKeywords.delete(kw);
+      await sendMessage(env, env.ADMIN_ID, `✅ 已删除敏感词: ${escapeHtml(kw)}`);
+      break;
+    }
+
+    case '/kwlist': {
+      if (bannedKeywords.size === 0) {
+        await sendMessage(env, env.ADMIN_ID, `📋 敏感词列表为空，当前模式: ${keywordAction === 'block' ? '🔨 拦截' : '⚠️ 警告'}`);
+        return;
+      }
+      const list = Array.from(bannedKeywords).join('\n• ');
+      await sendMessage(env, env.ADMIN_ID, `📋 敏感词列表 (${keywordAction === 'block' ? '🔨 拦截' : '⚠️ 警告'}):\n• ${list}`);
+      break;
+    }
+
+    case '/kwmode': {
+      const mode = args[0];
+      if (mode === 'block') {
+        keywordAction = 'block';
+        await sendMessage(env, env.ADMIN_ID, '🔨 关键词模式已切换为: 拦截（命中直接拦截）');
+      } else if (mode === 'warn') {
+        keywordAction = 'warn';
+        await sendMessage(env, env.ADMIN_ID, '⚠️ 关键词模式已切换为: 警告（命中仍转发，附标记）');
+      } else {
+        await sendMessage(env, env.ADMIN_ID, '❌ 用法: /kwmode <block|warn>');
+      }
       break;
     }
 
@@ -509,25 +690,15 @@ async function handleAdminCommand(msg, env) {
 }
 
 /**
- * 广播消息给所有用户（需要 KV 存储）
+ * 检查消息是否包含敏感词
  */
-async function broadcastToUsers(env, text) {
-  let success = 0;
-  let fail = 0;
-  try {
-    const allUsers = await env.USER_KV.list();
-    for (const key of allUsers.keys) {
-      try {
-        await sendMessage(env, parseInt(key.name), `📢 管理员广播:\n\n${escapeHtml(text)}`);
-        success++;
-      } catch {
-        fail++;
-      }
+function checkBannedKeywords(text) {
+  for (const kw of bannedKeywords) {
+    if (text.includes(kw)) {
+      return kw;
     }
-  } catch (e) {
-    console.error('广播失败:', e);
   }
-  return { success, fail };
+  return null;
 }
 
 /**
