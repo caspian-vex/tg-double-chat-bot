@@ -1,0 +1,3 @@
+name = "tg-double-chat-bot"
+main = "worker.js"
+compatibility_date = "2026-06-05"
