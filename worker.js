@@ -275,7 +275,7 @@ async function handleUpdate(update, env, ctx) {
       }
 
       // ====== 记录用户信息到 KV（如果配置了 USER_KV 存储）======
-            if (env.USER_KV) {
+      if (env.USER_KV) {
         await recordUser(env, userId, {
           id: userId,
           first_name: msg.from.first_name,
@@ -283,7 +283,7 @@ async function handleUpdate(update, env, ctx) {
           username: msg.from.username,
           language_code: msg.from.language_code,
           last_active: Date.now(),
-        }));
+        });
       }
       await handleUserMessage(msg, env);
     }
