@@ -79,6 +79,11 @@ export default {
       return await getWebhookInfo(env);
     }
 
+    // ========== 设置菜单按钮 ==========
+    if (url.pathname === '/setcommands') {
+      return await setBotCommands(env);
+    }
+
     // ========== 接收 Telegram 更新 ==========
     if (url.pathname.startsWith('/webhook/') && request.method === 'POST') {
       try {
@@ -154,6 +159,30 @@ async function deleteWebhook(env) {
 async function getWebhookInfo(env) {
   const res = await fetch(
     `https://api.telegram.org/bot${env.BOT_TOKEN}/getWebhookInfo`
+  );
+  const result = await res.json();
+  return new Response(JSON.stringify(result, null, 2), {
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+/**
+ * 设置 Bot 菜单命令（用户输入 / 时显示）
+ */
+async function setBotCommands(env) {
+  const res = await fetch(
+    `https://api.telegram.org/bot${env.BOT_TOKEN}/setMyCommands`,
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        commands: [
+          { command: 'start', description: '开始使用' },
+          { command: 'help', description: '使用帮助' },
+        ],
+        scope: { type: 'all_private_chats' },
+      }),
+    }
   );
   const result = await res.json();
   return new Response(JSON.stringify(result, null, 2), {
