@@ -279,12 +279,19 @@ async function handleUserMessage(msg, env) {
       }
 
       const text = `${header}\n\n${escapeHtml(msg.text)}`;
-      await sendReplyMarkup(env, env.ADMIN_ID, text, userId, username);
-      await sendMessage(env, userId, '✅ 消息已发送给管理员，请等待回复~');
+      // 单独 try-catch，即使转发失败也不影响确认消息
+      try {
+        await sendReplyMarkup(env, env.ADMIN_ID, text, userId, username);
+      } catch (e) {
+        console.error('转发消息失败:', e);
+      }
     } else {
       // 非文字消息暂不支持
       await sendMessage(env, userId, '⚠️ 目前仅支持文字消息，请发送文字。');
     }
+
+    // 通知用户消息已发送
+    await sendMessage(env, userId, '✅ 消息已发送给管理员，请等待回复~');
   } catch (e) {
     console.error('转发用户消息失败:', e);
   }
