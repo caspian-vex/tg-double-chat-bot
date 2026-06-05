@@ -258,7 +258,7 @@ async function handleUpdate(update, env, ctx) {
     const isAdmin = userId == env.ADMIN_ID;
 
     if (isAdmin) {
-      await handleAdminMessage(msg, env);
+      await handleAdminMessage(msg, env, ctx);
     } else {
       // ====== 安全验证 ======
 
@@ -269,7 +269,7 @@ async function handleUpdate(update, env, ctx) {
 
       // 2. 真人验证
       if (!verifiedUsers.has(userId)) {
-        await handleHumanVerification(msg, env);
+        await handleHumanVerification(msg, env, ctx);
         return;
       }
 
@@ -398,10 +398,10 @@ async function handleUserCommand(msg, env) {
 
 // ===================== 处理管理员消息 =====================
 
-async function handleAdminMessage(msg, env) {
+async function handleAdminMessage(msg, env, ctx) {
   // 处理管理员命令
   if (msg.text && msg.text.startsWith('/')) {
-    await handleAdminCommand(msg, env);
+    await handleAdminCommand(msg, env, ctx);
     return;
   }
 
@@ -541,7 +541,7 @@ const VERIFY_QUESTIONS = [
   { q: '4 乘 8 = ?', a: '32' },
 ];
 
-async function handleHumanVerification(msg, env) {
+async function handleHumanVerification(msg, env, ctx) {
   const userId = msg.from.id;
 
   // 如果用户正处在验证流程中，检查回答
@@ -627,7 +627,7 @@ async function handleHumanVerification(msg, env) {
 /**
  * 处理管理员命令
  */
-async function handleAdminCommand(msg, env) {
+async function handleAdminCommand(msg, env, ctx) {
   const cmd = msg.text.split(' ')[0];
   const args = msg.text.split(' ').slice(1);
 
