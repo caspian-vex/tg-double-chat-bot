@@ -122,6 +122,45 @@ async function saveKwActionToKV(env) {
   await env.USER_KV.put('keyword_action', keywordAction);
 }
 
+// ====== 垃圾信息存储 ======
+const SPAM_KEY = 'spam_log';
+const SPAM_MAX = 200; // 最多存200条
+
+async function saveSpamToKV(env, msg, matchedKeyword) {
+  if (!env.USER_KV) return;
+  try {
+    const raw = await env.USER_KV.get(SPAM_KEY);
+    let list = raw ? JSON.parse(raw) : [];
+    list.unshift({
+      time: Date.now(),
+      userId: msg.from.id,
+      name: msg.from.first_name || '' + (msg.from.last_name ? ' ' + msg.from.last_name : ''),
+      username: msg.from.username || '',
+      text: msg.text || '',
+      keyword: matchedKeyword,
+    });
+    if (list.length > SPAM_MAX) list = list.slice(0, SPAM_MAX);
+    await env.USER_KV.put(SPAM_KEY, JSON.stringify(list));
+  } catch (e) {
+    console.error('保存垃圾信息失败:', e);
+  }
+}
+
+async function getSpamCount(env) {
+  if (!env.USER_KV) return -1;
+  try {
+    const raw = await env.USER_KV.get(SPAM_KEY);
+    if (!raw) return 0;
+    const list = JSON.parse(raw);
+    return list.length;
+  } catch { return 0; }
+}
+
+async function clearSpamFromKV(env) {
+  if (!env.USER_KV) return;
+  await env.USER_KV.delete(SPAM_KEY);
+}
+
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
@@ -336,6 +375,8 @@ async function handleUserMessage(msg, env) {
         const matchedKeyword = checkBannedKeywords(msg.text);
         if (matchedKeyword) {
           if (keywordAction === 'block') {
+            // 存到垃圾箱再拦截
+            await saveSpamToKV(env, msg, matchedKeyword);
             await sendMessage(env, userId, '⚠️ 消息包含敏感内容，已被拦截。');
             return;
           } else {
@@ -644,6 +685,8 @@ async function handleAdminCommand(msg, env, ctx) {
         `• 支持文字/图片/视频/文件等\n\n` +
         `📋 可用命令:\n` +
         `/stats - 查看统计\n` +
+        `/spamlist - 📦 查看拦截的垃圾信息\n` +
+        `/clearspam - 🗑️ 清空垃圾信息\n` +
         `/block <ID> - 封禁用户\n` +
         `/unblock <ID> - 解封用户\n` +
         `/blocklist - 查看封禁列表\n` +
@@ -657,6 +700,8 @@ async function handleAdminCommand(msg, env, ctx) {
         env.ADMIN_ID,
         `📋 管理员命令:\n\n` +
         `/stats - 查看机器人统计信息\n` +
+        `/spamlist - 📦 查看拦截的垃圾信息（含用户信息和内容）\n` +
+        `/clearspam - 🗑️ 清空所有已拦截记录\n` +
         `/block <ID> - 🔨 封禁指定用户\n` +
         `/unblock <ID> - ✅ 解封指定用户\n` +
         `/blocklist - 📋 查看封禁列表\n` +
@@ -674,14 +719,60 @@ async function handleAdminCommand(msg, env, ctx) {
       const userCount = env.USER_KV
         ? await getUserCount(env)
         : '未配置 KV 存储';
+        const spamCount = env.USER_KV ? await getSpamCount(env) : -1;
       await sendMessage(
         env,
         env.ADMIN_ID,
         `📊 机器人统计\n\n` +
         `👤 联系过的用户: ${userCount}\n` +
+        `📦 拦截垃圾信息: ${spamCount === -1 ? '未配置 KV 存储' : spamCount}\n` +
         `🤖 机器人状态: 运行中`
       );
       break;
+
+    case '/spamlist': {
+      if (!env.USER_KV) {
+        await sendMessage(env, env.ADMIN_ID, '❌ 需要配置 KV 命名空间 (USER_KV)');
+        return;
+      }
+      try {
+        const raw = await env.USER_KV.get(SPAM_KEY);
+        if (!raw) {
+          await sendMessage(env, env.ADMIN_ID, '📦 垃圾箱为空，暂无拦截记录。');
+          return;
+        }
+        const list = JSON.parse(raw);
+        const showCount = Math.min(list.length, 5);
+        let msg = `📦 垃圾信息记录 (共${list.length}条，显示最近${showCount}条):\n\n`;
+        for (let i = 0; i < showCount; i++) {
+          const item = list[i];
+          const date = new Date(item.time).toLocaleString('zh-CN');
+          const name = escapeHtml(item.name);
+          const uname = item.username ? `@${escapeHtml(item.username)}` : '';
+          msg += `#${i+1} 🆔 ${item.userId} ${name} ${uname}\n`;
+          msg += `🔑 触发词: ${escapeHtml(item.keyword)}\n`;
+          msg += `💬 ${escapeHtml(item.text)}\n`;
+          msg += `🕐 ${date}\n\n`;
+        }
+        if (list.length > 5) {
+          msg += `… 还有 ${list.length - 5} 条，使用 /clearspam 清空\n`;
+        }
+        await sendMessage(env, env.ADMIN_ID, msg);
+      } catch (e) {
+        await sendMessage(env, env.ADMIN_ID, `❌ 读取垃圾箱失败: ${e.message}`);
+      }
+      break;
+    }
+
+    case '/clearspam': {
+      if (!env.USER_KV) {
+        await sendMessage(env, env.ADMIN_ID, '❌ 需要配置 KV 命名空间 (USER_KV)');
+        return;
+      }
+      await clearSpamFromKV(env);
+      await sendMessage(env, env.ADMIN_ID, '🗑️ 垃圾箱已清空。');
+      break;
+    }
 
     case '/block': {
       const targetId = parseInt(args[0]);
