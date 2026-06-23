@@ -353,6 +353,9 @@ async function handleUserMessage(msg, env) {
 
   // 构建转发头信息
   const header =
+    `📩 用户消息\n` +
+    `🆔 #${userId}\n` +
+    `👤 ${fullName}\n` +
     `${username ? `🔗 ${username}\n` : ''}` +
     `${langCode ? `🌐 ${langCode}\n` : ''}` +
     `📅 ${new Date().toLocaleString('zh-CN')}\n` +
@@ -560,6 +563,15 @@ function extractUsername(message) {
     const info = messageUserMap.get(message.message_id);
     if (info?.username) return info.username;
   }
+  // 回退：在 text 中查找 @用户名
+  if (message.text) {
+    const match = message.text.match(/🔗\s*@(\S+)/);
+    if (match) return `@${match[1]}`;
+  }
+  if (message.caption) {
+    const match = message.caption.match(/🔗\s*@(\S+)/);
+    if (match) return `@${match[1]}`;
+  }
   return '';
 }
 
@@ -594,7 +606,7 @@ async function handleHumanVerification(msg, env, ctx) {
       pendingVerification.delete(userId);
       await saveVerifiedToKV(env);
       await savePendingToKV(env);
-      await sendMessage(env, userId, '✅ 验证通过！现在你可以发送消息给管理员了。');
+      await sendMessage(env, userId, '✅ 验证通过！现在你可以发送消息了。');
       // 顺便处理命令
       if (msg.text === '/start') {
         await sendMessage(
@@ -624,7 +636,7 @@ async function handleHumanVerification(msg, env, ctx) {
       pendingVerification.delete(userId);
             await saveVerifiedToKV(env);
       await savePendingToKV(env);
-      await sendMessage(env, userId, '✅ 验证通过！现在你可以发送消息给管理员了。');
+      await sendMessage(env, userId, '✅ 验证通过！现在你可以发送消息了。');
       return;
     }
 
