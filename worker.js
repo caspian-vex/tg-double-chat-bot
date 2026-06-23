@@ -353,9 +353,6 @@ async function handleUserMessage(msg, env) {
 
   // 构建转发头信息
   const header =
-    `📩 用户消息\n` +
-    `🆔 #${userId}\n` +
-    `👤 ${fullName}\n` +
     `${username ? `🔗 ${username}\n` : ''}` +
     `${langCode ? `🌐 ${langCode}\n` : ''}` +
     `📅 ${new Date().toLocaleString('zh-CN')}\n` +
