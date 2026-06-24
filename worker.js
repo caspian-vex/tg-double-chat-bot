@@ -543,22 +543,8 @@ async function handleAdminMessage(msg, env, ctx) {
     return;
   }
 
-  // ===== 没有回复消息 = 视为用户发送的消息 =====
-  // 把管理员的消息当成普通用户消息处理，模拟用户→管理员的转发
-  const fakeMsg = {
-    ...msg,
-    from: {
-      id: env.ADMIN_ID,
-      first_name: msg.from.first_name || '我',
-      last_name: msg.from.last_name,
-      username: msg.from.username,
-      language_code: msg.from.language_code,
-      is_bot: false,
-    },
-    chat: { id: env.ADMIN_ID, type: 'private' },
-    reply_to_message: undefined,
-  };
-  await handleUserMessage(fakeMsg, env);
+  // ===== 没有回复消息 → 忽略（管理员直接发的消息不处理）=====
+  // 仅回复转发的用户消息才会转发给用户
 }
 
 /**
