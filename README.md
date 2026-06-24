@@ -1,5 +1,5 @@
 # tg-double-chat-bot
-
+# 部署教程大部分由AI编写，可能会存在不合理的地方，需自行判断(懒)
 Telegram 双向私聊机器人，部署在 Cloudflare Workers 上。
 
 ## 功能
@@ -23,71 +23,44 @@ Telegram 双向私聊机器人，部署在 Cloudflare Workers 上。
 | Cloudflare 账号 | 免费注册 [dash.cloudflare.com](https://dash.cloudflare.com) |
 | Bot Token | 在 Telegram 找 [@BotFather](https://t.me/BotFather) 发 `/newbot` 创建，拿到 Token |
 | 管理员 User ID | 找 [@userinfobot](https://t.me/userinfobot) 发 `/start`，拿到纯数字 ID |
-| Node.js | 本地安装 [Node.js](https://nodejs.org)（用于 Wrangler CLI） |
 
 ### 2. 克隆项目
 
-```bash
-git clone https://github.com/caspian-vex/tg-double-chat-bot.git
-cd tg-double-chat-bot
-npm install -g wrangler
-```
+将此 GitHub 项目 Fork 到你的 GitHub 账号下
 
-### 3. 配置 Wrangler
+### 3. 在 Cloudflare 创建 Worker（通过 GitHub）
 
-编辑 `wrangler.toml`，填入你的 Worker 信息和环境变量：
+1. 进入 [Cloudflare Dashboard](https://dash.cloudflare.com) → **Workers & Pages**
+2. 点击 **创建** → 选择 **Continue with GitHub**
+3. 授权 Cloudflare 访问 GitHub，选择你 Fork 的 `tg-double-chat-bot` 仓库
+4. 点击 **部署**，Worker 会自动部署到 Cloudflare
+5. 部署完成后**概述**下面会显示你的WORKER_URL
 
-```toml
-name = "tg-double-chat-bot"
-main = "worker.js"
-compatibility_date = "2026-06-05"
+### 4. 配置环境变量
 
-[observability]
-enabled = false
-head_sampling_rate = 1
+共需要三个环境变量：
 
-[observability.logs]
-enabled = true
+> 全部在 Cloudflare Dashboard → Worker → 设置 → 变量和密钥 中添加。
 
-# 非敏感变量放这里
-[vars]
-ADMIN_ID = "你的数字ID"
-WORKER_URL = "https://你的worker名.你的子域名.workers.dev"
-```
+| 变量名 | 类型 | 说明 | 示例 |
+|--------|------|------|------|
+| `BOT_TOKEN` |  密钥 | Telegram Bot Token | `7234567890:AAHxxxxxxxxxxxxxxxx` |
+| `ADMIN_ID` |  文本 | 管理员 ID | `123456789` |
+| `WORKER_URL` |  文本 | Worker 访问地址 | `https://tg-double-chat-bot.xxx.workers.dev` |
 
-**⚠️ Bot Token 是敏感信息**，用命令行设置：
 
-```bash
-wrangler secret put BOT_TOKEN
-# 输入你的 Token，例如 7234567890:AAH...
-```
 
-### 4. 创建 KV 命名空间并绑定
+
+### 5. 创建 KV 命名空间并绑定(黑名单和垃圾处理，可选)
 
 在 Cloudflare Dashboard 上：
 
-1. Workers & Pages → KV → **创建命名空间** → 取名 `TG_USER_DB`
-2. 回到 `worker.js` 所在的 Worker → 设置 → 变量 → **KV 命名空间绑定**
-   - 变量名：`USER_KV`
+1. Workers & Pages → KV → **创建命名空间** → 取名 `TG_USER_DB`(建议不要改其他名字，你可能记不住)
+2. 回到 `worker.js` 所在的 Worker →  **绑定** →添加绑定 →选择KV命名空间
+   - 变量名称：`USER_KV`
    - KV 命名空间：选择 `TG_USER_DB`
 
-> `wrangler.toml` 里也可以加一行：
-> ```toml
-> [[kv_namespaces]]
-> binding = "USER_KV"
-> id = "你的KV命名空间ID"
-> ```
-> KV 命名空间 ID 在 Cloudflare Dashboard → KV → 你的命名空间 页面可以看到。
-
-### 5. 部署
-
-```bash
-wrangler deploy
-```
-
-部署成功后终端会显示 Worker URL，记下来。
-
-### 6. 设置 Webhook
+### 7. 设置 Webhook
 
 浏览器访问：
 
@@ -97,7 +70,7 @@ https://你的域名/setup
 
 看到 `{"ok": true}` 表示 Webhook 注册成功。
 
-### 7. 设置菜单按钮
+### 8. 设置菜单按钮
 
 ```
 https://你的域名/setcommands
@@ -105,7 +78,7 @@ https://你的域名/setcommands
 
 此后用户输入 `/` 即可看到菜单。
 
-### 8. 测试
+### 9. 测试
 
 在 Telegram 给机器人发 `/start`，应该收到回复。
 
@@ -158,14 +131,11 @@ tg-double-chat-bot/
 
 ## 常见问题
 
-**Q: 我只有一个 Telegram 号怎么测试？**
-A: 管理员直接发文字会被当成用户消息转发给自己，可以完整走通双向流程。
-
 **Q: Worker 部署后没反应？**
 A: 先访问 `/webhook-info` 检查 Webhook 状态，再查看 Cloudflare Worker 日志。
 
-**Q: 环境变量部署后被清空了？**
-A: 用 `wrangler secret put` 设置的变量不会被清。普通变量写在 `wrangler.toml` 的 `[vars]` 中。
+**Q: 重新部署后环境变量被清空了？**
+A: WORKER_URL和ADMIN_ID会随之清空，不想的话可以设置成密钥类型。
 
 **Q: KV 里面没有数据？**
 A: KV 只在敏感词触发、封禁/解封、验证通过等操作时才写入。管理员自身操作不会触发写入。
