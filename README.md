@@ -75,12 +75,13 @@ Telegram 双向私聊机器人，部署在 Cloudflare Workers 上。
 
 在 Cloudflare Dashboard 上：
 
-1. Workers & Pages → KV → **创建命名空间** → 取名 `TG_USER_DB`(建议不要改其他名字，你可能记不住)
-2. 回到 `worker.js` 所在的 Worker →  **绑定** →添加绑定 →选择KV命名空间
+1. Workers & Pages → KV → **创建命名空间** → 取名 `TG_USER_DB`。
+2. 将该命名空间的 ID 填入 `wrangler.toml` 中 `[[kv_namespaces]]` 的 `id`。本仓库当前 ID 只适用于原 Cloudflare 账号；Fork 后必须替换成自己的 ID。
+3. 回到 Worker → **设置 → 绑定**，确认生产环境存在以下 KV 绑定：
    - 变量名称：`USER_KV`
    - KV 命名空间：选择 `TG_USER_DB`
 
-KV 保存用户 ID 与话题 ID 的对应关系。未绑定 `USER_KV` 时，机器人不会创建话题或转发用户消息。
+KV 保存用户 ID 与话题 ID 的对应关系。未绑定 `USER_KV` 时，机器人不会创建话题或转发用户消息。Git 部署以 `wrangler.toml` 为准，控制台提示“Update your Wrangler configuration”时应把绑定同步到该文件。
 
 ### 6. 设置 Webhook
 
@@ -94,7 +95,9 @@ https://你的域名/setup
 
 ### 7. 获取超级群 ID
 
-在超级群中以管理员账号发送 `/chatid`，机器人会回复群 ID。将这个负数填入 `ADMIN_GROUP_ID`，然后重新部署 Worker。机器人必须是群管理员，否则可能收不到话题中的普通消息。
+在群中以管理员账号发送 `/chatid`，机器人会回复群 ID、群类型和话题状态。只有显示 `supergroup` 且“话题: 已开启”才可用于此模式。将这时返回的群 ID 填入 `ADMIN_GROUP_ID`；不要沿用升级前普通群的 ID，也不要手工在旧 ID 前拼 `-100`。机器人必须是群管理员，否则可能收不到话题中的普通消息。
+
+管理员还可以私聊机器人发送 `/config`，查看当前运行环境是否读到 `USER_KV`，以及 `ADMIN_GROUP_ID` 指向的群类型和话题状态。
 
 ### 8. 设置菜单按钮
 
@@ -115,6 +118,7 @@ https://你的域名/setcommands
 | 命令 | 说明 |
 |------|------|
 | `/stats` | 查看统计（用户数、垃圾箱计数） |
+| `/config` | 检查 KV 绑定、管理员群类型和话题状态 |
 | `/spamlist` | 📦 查看最近拦截的垃圾信息 |
 | `/clearspam` | 🗑️ 清空垃圾箱 |
 | `/block <ID>` | 🔨 封禁指定用户 |

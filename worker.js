@@ -326,12 +326,13 @@ async function handleUpdate(update, env, ctx) {
       return;
     }
 
-    // 管理员可在超级群发送 /chatid，以便首次配置 ADMIN_GROUP_ID。
-    if (chatType === 'supergroup') {
+    // 管理员可在群中发送 /chatid，确认当前群是否已开启话题。
+    if (chatType === 'group' || chatType === 'supergroup') {
       if (userId == env.ADMIN_ID && msg.text?.split(' ')[0] === '/chatid') {
-        await sendMessage(env, chatId, `超级群 ID: ${chatId}`,
+        await sendMessage(env, chatId,
+          `群 ID: ${chatId}\n类型: ${chatType}\n话题: ${msg.chat.is_forum ? '已开启' : '未开启'}${chatType !== 'supergroup' ? '\n请先将此群升级为超级群并开启话题。' : ''}`,
           msg.message_thread_id ? { message_thread_id: msg.message_thread_id } : {});
-      } else if (String(chatId) === String(env.ADMIN_GROUP_ID) && userId == env.ADMIN_ID && !msg.from.is_bot) {
+      } else if (chatType === 'supergroup' && String(chatId) === String(env.ADMIN_GROUP_ID) && userId == env.ADMIN_ID && !msg.from.is_bot) {
         await handleTopicMessage(msg, env);
       }
       return;
@@ -766,6 +767,7 @@ async function handleAdminCommand(msg, env, ctx) {
         `/block <ID> - 封禁用户\n` +
         `/unblock <ID> - 解封用户\n` +
         `/blocklist - 查看封禁列表\n` +
+        `/config - 检查话题模式配置\n` +
         `/help - 帮助`
       );
       break;
@@ -785,10 +787,26 @@ async function handleAdminCommand(msg, env, ctx) {
         `/delkw <词> - 删除敏感词\n` +
         `/kwlist - 查看敏感词列表\n` +
         `/kwmode <block|warn> - 拦截/警告模式\n` +
+        `/config - 检查群类型、话题与 KV 绑定\n` +
         `/help - 显示此帮助\n\n` +
         `💡 在用户对应的话题中发消息即可回复该用户。`
       );
       break;
+
+    case '/config': {
+      let groupStatus = '未设置 ADMIN_GROUP_ID';
+      if (env.ADMIN_GROUP_ID) {
+        try {
+          const chat = (await callTelegramApi(env, 'getChat', { chat_id: env.ADMIN_GROUP_ID })).result;
+          groupStatus = `ID: ${chat.id}\n类型: ${chat.type}\n话题: ${chat.is_forum ? '已开启' : '未开启'}`;
+        } catch (error) {
+          groupStatus = `无法读取群信息：${error.message}`;
+        }
+      }
+      await sendMessage(env, env.ADMIN_ID,
+        `⚙️ 话题模式配置\nUSER_KV: ${env.USER_KV ? '已绑定' : '未绑定'}\n${groupStatus}`);
+      break;
+    }
 
     case '/stats':
       // 简单统计 - 从 KV 获取数据（如果有配置 KV）

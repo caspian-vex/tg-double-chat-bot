@@ -1,6 +1,11 @@
 name = "tg-double-chat-bot"
 main = "worker.js"
 compatibility_date = "2026-06-05"
+keep_vars = true
+
+[[kv_namespaces]]
+binding = "USER_KV"
+id = "75b9149ac0f54613a233513d940d9415"
 
 [observability]
 enabled = false

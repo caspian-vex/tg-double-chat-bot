@@ -11,6 +11,8 @@ globalThis.fetch = async (url, options) => {
   sent.push({ method, ...payload });
   const result = method === 'createForumTopic'
     ? { message_thread_id: nextTopicId++ }
+    : method === 'getChat'
+      ? { id: payload.chat_id, type: String(payload.chat_id).startsWith('-100') ? 'supergroup' : 'group', is_forum: String(payload.chat_id).startsWith('-100') }
     : { message_id: sent.length };
   return { json: async () => ({ ok: true, result }) };
 };
@@ -104,6 +106,20 @@ test('admin can get the supergroup ID before configuring it', async () => {
     text: '/chatid',
   });
   assert.match(messages[0].text, /-1001234/);
+});
+
+test('diagnostics distinguish a basic group from a forum supergroup', async () => {
+  let messages = await deliver({
+    chat: { id: -4711678652, type: 'group' },
+    from: { id: 9999 },
+    text: '/chatid',
+  });
+  assert.match(messages[0].text, /类型: group/);
+  assert.match(messages[0].text, /升级为超级群/);
+
+  messages = await send(9999, '/config', { ADMIN_GROUP_ID: '-4711678652', USER_KV: kv });
+  assert.equal(messages.some(message => message.method === 'getChat'), true);
+  assert.equal(messages.some(message => /类型: group/.test(message.text)), true);
 });
 
 test('a fresh Worker instance reads both mappings from KV and relays media', async () => {
