@@ -47,6 +47,22 @@ Telegram 双向私聊机器人，部署在 Cloudflare Workers 上。
 | `BOT_TOKEN` |  密钥 | Telegram Bot Token | `7234567890:AAHxxxxxxxxxxxxxxxx` |
 | `ADMIN_ID` |  文本 | 管理员 ID | `123456789` |
 | `WORKER_URL` |  文本 | Worker 访问地址 | `https://tg-double-chat-bot.xxx.workers.dev` |
+| `VERIFY_QUESTIONS` | 文本，可选 | 自定义验证题库，JSON 数组 | 见下方示例 |
+
+### 自定义验证问题
+
+在 Worker 的“设置 → 变量和密钥”中添加 `VERIFY_QUESTIONS`，值为 JSON 数组，每项包含字符串类型的 `question` 和 `answer`：
+
+```json
+[
+  {"question":"你从哪里知道这个机器人？","answer":"官网"},
+  {"question":"请填写约定的联络暗号","answer":"蓝鲸"}
+]
+```
+
+机器人会随机选一道题。用户的回答会去掉首尾空格后与答案逐字比较，大小写和中间空格不会自动转换。可以按需增删题目；不设置该变量时继续使用原来的 12 道数学题。格式错误或题库为空时，机器人不会发放新题，管理员会收到配置错误提示。已发出的题目仍按原答案验证，已经通过验证的用户也不会重新验证。
+
+验证过程中再次发送 `/start` 或 `/help` 只会重发当前题目，不会直接通过验证，也不计入错误次数。
 
 
 

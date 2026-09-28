@@ -10,6 +10,7 @@
  *   BOT_TOKEN   - Telegram Bot Token (从 @BotFather 获取)
  *   ADMIN_ID    - 管理员的 Telegram User ID (数字格式)
  *   WORKER_URL  - Worker 部署后的完整 URL (如 https://xxx.workers.dev)
+ *   VERIFY_QUESTIONS - 可选，JSON 格式的验证题库
  */
 
 // 消息ID → { userId, username } 映射表（用于精确匹配回复目标）
@@ -592,20 +593,39 @@ function extractUsername(message) {
 
 // ===================== 真人验证 =====================
 
-const VERIFY_QUESTIONS = [
-  { q: '1 加 1 = ?', a: '2' },
-  { q: '5 加 3 = ?', a: '8' },
-  { q: '10 减 4 = ?', a: '6' },
-  { q: '7 加 8 = ?', a: '15' },
-  { q: '20 除 4 = ?', a: '5' },
-  { q: '3 乘 3 = ?', a: '9' },
-  { q: '12 加 15 = ?', a: '27' },
-  { q: '100 减 25 = ?', a: '75' },
-  { q: '6 乘 7 = ?', a: '42' },
-  { q: '9 加 6 = ?', a: '15' },
-  { q: '30 除 5 = ?', a: '6' },
-  { q: '4 乘 8 = ?', a: '32' },
+const DEFAULT_VERIFY_QUESTIONS = [
+  { question: '1 加 1 = ?', answer: '2' },
+  { question: '5 加 3 = ?', answer: '8' },
+  { question: '10 减 4 = ?', answer: '6' },
+  { question: '7 加 8 = ?', answer: '15' },
+  { question: '20 除 4 = ?', answer: '5' },
+  { question: '3 乘 3 = ?', answer: '9' },
+  { question: '12 加 15 = ?', answer: '27' },
+  { question: '100 减 25 = ?', answer: '75' },
+  { question: '6 乘 7 = ?', answer: '42' },
+  { question: '9 加 6 = ?', answer: '15' },
+  { question: '30 除 5 = ?', answer: '6' },
+  { question: '4 乘 8 = ?', answer: '32' },
 ];
+
+function getVerifyQuestions(env) {
+  if (!env.VERIFY_QUESTIONS) return DEFAULT_VERIFY_QUESTIONS;
+
+  let questions;
+  try {
+    questions = JSON.parse(env.VERIFY_QUESTIONS);
+  } catch {
+    throw new Error('VERIFY_QUESTIONS 必须是有效的 JSON 数组');
+  }
+
+  if (!Array.isArray(questions) || questions.length === 0 ||
+      questions.some(item => !item || typeof item.question !== 'string' ||
+        !item.question.trim() || typeof item.answer !== 'string' || !item.answer.trim())) {
+    throw new Error('VERIFY_QUESTIONS 必须是非空数组，每项都需要非空的 question 和 answer 字符串');
+  }
+
+  return questions.map(item => ({ question: item.question.trim(), answer: item.answer.trim() }));
+}
 
 async function handleHumanVerification(msg, env, ctx) {
   const userId = msg.from.id;
@@ -614,44 +634,20 @@ async function handleHumanVerification(msg, env, ctx) {
   if (pendingVerification.has(userId)) {
     const verify = pendingVerification.get(userId);
 
-    // 检查是不是 /start 或 /help
-    if (msg.text && (msg.text === '/start' || msg.text === '/help')) {
-      // 直接通过验证（是真人发命令的行为）
-      verifiedUsers.add(userId);
-      pendingVerification.delete(userId);
-      await saveVerifiedToKV(env);
-      await savePendingToKV(env);
-      await sendMessage(env, userId, '✅ 验证通过！现在你可以发送消息了。');
-      // 顺便处理命令
-      if (msg.text === '/start') {
-        await sendMessage(
-          env,
-          userId,
-          `👋 你好！我是双向私聊机器人。\n\n` +
-          `📝 直接发送消息给我，我会转发给管理员。\n` +
-          `⏳ 管理员回复后，我会第一时间转发给你。\n\n` +
-          `📝 目前仅支持文字消息。`
-        );
-      } else {
-        await sendMessage(
-          env,
-          userId,
-          `💡 使用说明\n\n` +
-          `直接发送文字消息即可，管理员会收到并回复你。\n\n` +
-          `📝 目前仅支持文字消息。`
-        );
-      }
-      return;
-    }
-
     // 检查回答是否正确
     if (msg.text && msg.text.trim() === verify.answer) {
       // 验证通过
       verifiedUsers.add(userId);
       pendingVerification.delete(userId);
-            await saveVerifiedToKV(env);
+      await saveVerifiedToKV(env);
       await savePendingToKV(env);
       await sendMessage(env, userId, '✅ 验证通过！现在你可以发送消息了。');
+      return;
+    }
+
+    // 命令只能重发当前题目，不能跳过验证，也不算答错
+    if (msg.text && (msg.text === '/start' || msg.text === '/help')) {
+      await sendMessage(env, userId, `🧮 请先回答验证问题：\n\n${verify.question}\n\n剩余 ${3 - verify.attempts} 次机会。`);
       return;
     }
 
@@ -672,20 +668,27 @@ async function handleHumanVerification(msg, env, ctx) {
   }
 
   // 首次验证：生成随机题目
-  const question = VERIFY_QUESTIONS[Math.floor(Math.random() * VERIFY_QUESTIONS.length)];
+  let questions;
+  try {
+    questions = getVerifyQuestions(env);
+  } catch (error) {
+    await sendMessage(env, userId, '❌ 验证暂时不可用，请稍后再试。');
+    throw error;
+  }
+  const question = questions[Math.floor(Math.random() * questions.length)];
   pendingVerification.set(userId, {
-    answer: question.a,
+    answer: question.answer,
     attempts: 0,
-    question: question.q,
+    question: question.question,
   });
 
-    await savePendingToKV(env);
+  await savePendingToKV(env);
 
   await sendMessage(
     env,
     userId,
     `🧮 请回答验证问题以证明你是真人:\n\n` +
-    `${question.q}\n\n` +
+    `${question.question}\n\n` +
     `你有 3 次机会。回答正确后即可使用机器人。`
   );
 }
