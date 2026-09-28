@@ -293,6 +293,7 @@ async function setBotCommands(env) {
     { command: 'start', description: '查看管理员使用说明' },
     { command: 'help', description: '查看管理员命令' },
     { command: 'config', description: '检查群和 KV 配置' },
+    { command: 'setcommands', description: '更新机器人命令菜单' },
     { command: 'stats', description: '查看机器人统计' },
     { command: 'spamlist', description: '查看拦截消息' },
     { command: 'clearspam', description: '清空拦截消息' },
@@ -343,7 +344,7 @@ async function handleUpdate(update, env, ctx) {
 
     // 管理员可在群中发送 /chatid，确认当前群是否已开启话题。
     if (chatType === 'group' || chatType === 'supergroup') {
-      if (userId == env.ADMIN_ID && msg.text?.split(' ')[0] === '/chatid') {
+      if (userId == env.ADMIN_ID && getCommandName(msg.text) === '/chatid') {
         await sendMessage(env, chatId,
           `群 ID: ${chatId}\n类型: ${chatType}\n话题: ${msg.chat.is_forum ? '已开启' : '未开启'}${chatType !== 'supergroup' ? '\n请先将此群升级为超级群并开启话题。' : ''}`,
           msg.message_thread_id ? { message_thread_id: msg.message_thread_id } : {});
@@ -546,8 +547,12 @@ async function handleTopicMessage(msg, env) {
 /**
  * 处理用户发送的命令
  */
+function getCommandName(text) {
+  return text?.trim().split(/\s+/, 1)[0].split('@', 1)[0] || '';
+}
+
 async function handleUserCommand(msg, env) {
-  const cmd = msg.text.split(' ')[0];
+  const cmd = getCommandName(msg.text);
   switch (cmd) {
     case '/start':
       await sendMessage(
@@ -801,8 +806,8 @@ async function handleHumanVerification(msg, env, ctx) {
  * 处理管理员命令
  */
 async function handleAdminCommand(msg, env, ctx) {
-  const cmd = msg.text.split(' ')[0];
-  const args = msg.text.split(' ').slice(1);
+  const [command, ...args] = msg.text.trim().split(/\s+/);
+  const cmd = getCommandName(command);
 
   switch (cmd) {
     case '/start':
@@ -822,6 +827,7 @@ async function handleAdminCommand(msg, env, ctx) {
         `/unblock <ID> - 解封用户\n` +
         `/blocklist - 查看封禁列表\n` +
         `/config - 检查话题模式配置\n` +
+        `/setcommands - 更新命令菜单\n` +
         `/help - 帮助`
       );
       break;
@@ -842,10 +848,20 @@ async function handleAdminCommand(msg, env, ctx) {
         `/kwlist - 查看敏感词列表\n` +
         `/kwmode <block|warn> - 拦截/警告模式\n` +
         `/config - 检查群类型、话题与 KV 绑定\n` +
+        `/setcommands - 更新命令菜单\n` +
         `/help - 显示此帮助\n\n` +
         `💡 在用户对应的话题中发消息即可回复该用户。`
       );
       break;
+
+    case '/setcommands': {
+      const response = await setBotCommands(env);
+      const result = await response.json();
+      await sendMessage(env, env.ADMIN_ID, result.ok
+        ? `✅ 命令菜单已更新：普通用户 ${result.user_commands} 项，管理员 ${result.admin_commands} 项。`
+        : `❌ 更新命令菜单失败：${result.error || '请检查 Worker 日志'}`);
+      break;
+    }
 
     case '/config': {
       let groupStatus = '未设置 ADMIN_GROUP_ID';

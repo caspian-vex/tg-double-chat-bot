@@ -187,7 +187,17 @@ test('command setup gives the administrator every supported private command', as
   assert.deepEqual(calls[0].commands.map(item => item.command), ['start', 'help']);
   assert.deepEqual(calls[1].scope, { type: 'chat', chat_id: 9999 });
   assert.deepEqual(calls[1].commands.map(item => item.command), [
-    'start', 'help', 'config', 'stats', 'spamlist', 'clearspam', 'block', 'unblock',
+    'start', 'help', 'config', 'setcommands', 'stats', 'spamlist', 'clearspam', 'block', 'unblock',
     'blocklist', 'addkw', 'delkw', 'kwlist', 'kwmode',
   ]);
+});
+
+test('admin can update the menu from Telegram and use commands with a bot suffix', async () => {
+  let messages = await send(9999, '/setcommands');
+  assert.equal(messages.filter(message => message.method === 'setMyCommands').length, 2);
+  assert.equal(messages.some(message => /命令菜单已更新/.test(message.text)), true);
+
+  messages = await send(9999, '/config@test_bot', topicEnv);
+  assert.equal(messages.some(message => message.method === 'getChat'), true);
+  assert.equal(messages.some(message => /话题模式配置/.test(message.text)), true);
 });
