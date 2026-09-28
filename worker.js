@@ -2,19 +2,23 @@
  * Telegram 双向私聊机器人 - Cloudflare Workers 部署
  *
  * 功能：
- * 1. 用户给机器人发消息 → 转发给管理员
- * 2. 管理员回复转发的消息 → 自动发回给对应用户
+ * 1. 用户给机器人发消息 → 复制到管理员超级群中该用户的话题
+ * 2. 管理员在话题中发消息 → 自动发回给对应用户
  * 3. 支持文字、图片、视频、文件、语音、贴纸等多种消息类型
  *
  * 环境变量 (在 Cloudflare Dashboard 中设置):
  *   BOT_TOKEN   - Telegram Bot Token (从 @BotFather 获取)
  *   ADMIN_ID    - 管理员的 Telegram User ID (数字格式)
+ *   ADMIN_GROUP_ID - 开启话题的私有超级群 ID（负数）
  *   WORKER_URL  - Worker 部署后的完整 URL (如 https://xxx.workers.dev)
  *   VERIFY_QUESTIONS - 可选，JSON 格式的验证题库
+ *   USER_KV     - KV 命名空间绑定，用于持久化话题与用户的对应关系
  */
 
-// 消息ID → { userId, username } 映射表（用于精确匹配回复目标）
-const messageUserMap = new Map();
+const topicCreation = new Map(); // 同一 Worker 实例中防止并发创建重复话题
+const userTopics = new Map(); // 同一实例内避免 KV 传播延迟导致重复建话题
+const topicUsers = new Map(); // 新建话题后立即可供管理员回复使用
+const messageUserMap = new Map(); // 兼容旧版私聊中的管理员回复
 
 // ====== 安全防护 ======
 const blockedUsers = new Set();        // 被封禁的用户ID
@@ -135,9 +139,9 @@ async function saveSpamToKV(env, msg, matchedKeyword) {
     list.unshift({
       time: Date.now(),
       userId: msg.from.id,
-      name: msg.from.first_name || '' + (msg.from.last_name ? ' ' + msg.from.last_name : ''),
+      name: [msg.from.first_name, msg.from.last_name].filter(Boolean).join(' '),
       username: msg.from.username || '',
-      text: msg.text || '',
+      text: msg.text || msg.caption || '',
       keyword: matchedKeyword,
     });
     if (list.length > SPAM_MAX) list = list.slice(0, SPAM_MAX);
@@ -306,14 +310,12 @@ async function handleUpdate(update, env, ctx) {
   if (!update.message) return;
 
   const msg = update.message;
+  if (!msg.from) return;
   const chatId = msg.chat.id;
   const userId = msg.from.id;
   const chatType = msg.chat.type;
 
   try {
-    // 只处理私聊消息
-    if (chatType !== 'private') return;
-
     // 检查环境变量
     if (!env.BOT_TOKEN) {
       console.error('BOT_TOKEN 未设置');
@@ -323,6 +325,18 @@ async function handleUpdate(update, env, ctx) {
       console.error('ADMIN_ID 未设置');
       return;
     }
+
+    // 管理员可在超级群发送 /chatid，以便首次配置 ADMIN_GROUP_ID。
+    if (chatType === 'supergroup') {
+      if (userId == env.ADMIN_ID && msg.text?.split(' ')[0] === '/chatid') {
+        await sendMessage(env, chatId, `超级群 ID: ${chatId}`,
+          msg.message_thread_id ? { message_thread_id: msg.message_thread_id } : {});
+      } else if (String(chatId) === String(env.ADMIN_GROUP_ID) && userId == env.ADMIN_ID && !msg.from.is_bot) {
+        await handleTopicMessage(msg, env);
+      }
+      return;
+    }
+    if (chatType !== 'private') return;
 
     // 判断发送者是否为管理员
     const isAdmin = userId == env.ADMIN_ID;
@@ -373,68 +387,104 @@ async function handleUpdate(update, env, ctx) {
 // ===================== 处理用户消息 =====================
 
 async function handleUserMessage(msg, env) {
-  const from = msg.from;
-  const userId = from.id;
-  const userName = escapeHtml(from.first_name || '');
-  const lastName = escapeHtml(from.last_name || '');
-  const fullName = [userName, lastName].filter(Boolean).join(' ');
-  const username = from.username ? `@${escapeHtml(from.username)}` : '';
-  const langCode = from.language_code || '';
+  const userId = msg.from.id;
+  if (msg.text?.startsWith('/')) {
+    await handleUserCommand(msg, env);
+    return;
+  }
 
-  // 构建转发头信息
-  const header =
-    `📩 用户消息\n` +
-    `🆔 #${userId}\n` +
-    `👤 ${fullName}\n` +
-    `${username ? `🔗 ${username}\n` : ''}` +
-    `${langCode ? `🌐 ${langCode}\n` : ''}` +
-    `📅 ${new Date().toLocaleString('zh-CN')}\n` +
-    `──────────────────`;
+  const matchedKeyword = checkBannedKeywords(msg.text || msg.caption || '');
+  if (matchedKeyword && keywordAction === 'block') {
+    await saveSpamToKV(env, msg, matchedKeyword);
+    await sendMessage(env, userId, '⚠️ 消息包含敏感内容，已被拦截。');
+    return;
+  }
 
-  // 只处理文字消息
+  if (!env.ADMIN_GROUP_ID || !env.USER_KV) {
+    console.error('话题模式需要 ADMIN_GROUP_ID 和 USER_KV');
+    await sendMessage(env, userId, '❌ 消息暂时无法发送，请稍后再试。');
+    return;
+  }
+
   try {
-    if (msg.text) {
-      // 处理命令
-      if (msg.text.startsWith('/')) {
-        await handleUserCommand(msg, env);
-        return;
-      }
-
-      // 关键词拦截
-      if (bannedKeywords.size > 0) {
-        const matchedKeyword = checkBannedKeywords(msg.text);
-        if (matchedKeyword) {
-          if (keywordAction === 'block') {
-            // 存到垃圾箱再拦截
-            await saveSpamToKV(env, msg, matchedKeyword);
-            await sendMessage(env, userId, '⚠️ 消息包含敏感内容，已被拦截。');
-            return;
-          } else {
-            // warn 模式：转发并标记
-            const text = `${header}\n\n⚠️ 敏感词触发: ${escapeHtml(matchedKeyword)}\n──────────────────\n${escapeHtml(msg.text)}`;
-            await sendReplyMarkup(env, env.ADMIN_ID, text, userId, username);
-            await sendMessage(env, userId, '✅ 消息已发送给管理员，请等待回复~');
-            return;
-          }
-        }
-      }
-
-      const text = `${header}\n\n${escapeHtml(msg.text)}`;
-      // 单独 try-catch，即使转发失败也不影响确认消息
-      try {
-        await sendReplyMarkup(env, env.ADMIN_ID, text, userId, username);
-      } catch (e) {
-        console.error('转发消息失败:', e);
-      }
-    } else {
-      // 非文字消息暂不支持
-      await sendMessage(env, userId, '⚠️ 目前仅支持文字消息，请发送文字。');
+    const topicId = await getOrCreateTopic(env, msg.from);
+    if (matchedKeyword) {
+      await sendMessage(env, env.ADMIN_GROUP_ID, `⚠️ 敏感词触发：${matchedKeyword}`, { message_thread_id: topicId });
     }
-
-    // 通知用户消息已发送
+    await callTelegramApi(env, 'copyMessage', {
+      chat_id: env.ADMIN_GROUP_ID,
+      message_thread_id: topicId,
+      from_chat_id: msg.chat.id,
+      message_id: msg.message_id,
+    });
     await sendMessage(env, userId, '✅ 消息已发送给管理员，请等待回复~');
   } catch (e) {
     console.error('转发用户消息失败:', e);
+    await sendMessage(env, userId, '❌ 消息发送失败，请稍后重试。');
+  }
+}
+
+async function getOrCreateTopic(env, from) {
+  const groupId = String(env.ADMIN_GROUP_ID);
+  const userId = String(from.id);
+  const userKey = `user_topic:${groupId}:${userId}`;
+  if (userTopics.has(userKey)) return userTopics.get(userKey);
+  const pending = topicCreation.get(userKey);
+  if (pending) return pending;
+
+  const creation = (async () => {
+    const existing = await env.USER_KV.get(userKey);
+    if (existing) {
+      const topicId = Number(existing);
+      userTopics.set(userKey, topicId);
+      return topicId;
+    }
+
+    const displayName = ([from.first_name, from.last_name].filter(Boolean).join(' ') || from.username || '用户')
+      .replace(/\s+/g, ' ').trim();
+    const name = `${displayName.slice(0, 90)} #${userId}`;
+    const result = await callTelegramApi(env, 'createForumTopic', {
+      chat_id: env.ADMIN_GROUP_ID,
+      name,
+    });
+    const topicId = result.result.message_thread_id;
+    if (!topicId) throw new Error('Telegram 未返回话题 ID');
+    await env.USER_KV.put(`topic_user:${groupId}:${topicId}`, userId);
+    await env.USER_KV.put(userKey, String(topicId));
+    userTopics.set(userKey, topicId);
+    topicUsers.set(`${groupId}:${topicId}`, userId);
+    await sendMessage(env, env.ADMIN_GROUP_ID,
+      `👤 ${displayName}\n🆔 ${userId}${from.username ? `\n🔗 @${from.username}` : ''}`,
+      { message_thread_id: topicId });
+    return topicId;
+  })();
+  topicCreation.set(userKey, creation);
+  try {
+    return await creation;
+  } finally {
+    topicCreation.delete(userKey);
+  }
+}
+
+async function handleTopicMessage(msg, env) {
+  const topicId = msg.message_thread_id;
+  if (!topicId || !env.USER_KV) return;
+  const groupId = String(env.ADMIN_GROUP_ID);
+  const key = `${groupId}:${topicId}`;
+  const userId = topicUsers.get(key) || await env.USER_KV.get(`topic_user:${key}`);
+  if (!userId) return; // 未关联用户的话题不参与转发
+  topicUsers.set(key, userId);
+
+  try {
+    await callTelegramApi(env, 'copyMessage', {
+      chat_id: userId,
+      from_chat_id: msg.chat.id,
+      message_id: msg.message_id,
+    });
+  } catch (e) {
+    console.error('话题回复用户失败:', e);
+    await sendMessage(env, env.ADMIN_GROUP_ID, `❌ 发送给用户 #${userId} 失败：${e.message}`,
+      { message_thread_id: topicId });
   }
 }
 
@@ -449,9 +499,9 @@ async function handleUserCommand(msg, env) {
         env,
         msg.chat.id,
         `👋 你好！我是双向私聊机器人。\n\n` +
-        `📝 直接发送消息给我，我会转发给管理员。\n` +
+        `📝 直接发送消息给我，我会放入你的专属话题。\n` +
         `⏳ 管理员回复后，我会第一时间转发给你。\n\n` +
-        `📝 目前仅支持文字消息。`
+        `📝 支持文字和常见媒体消息。`
       );
       break;
     case '/help':
@@ -459,8 +509,7 @@ async function handleUserCommand(msg, env) {
         env,
         msg.chat.id,
         `💡 使用说明\n\n` +
-        `直接发送文字消息即可，管理员会收到并回复你。\n\n` +
-        `📝 目前仅支持文字消息。`
+        `直接发送消息即可，管理员会在你的专属话题收到并回复你。`
       );
       break;
     default:
@@ -707,8 +756,8 @@ async function handleAdminCommand(msg, env, ctx) {
         env.ADMIN_ID,
         `👋 欢迎使用双向私聊机器人！\n\n` +
         `📌 使用方式：\n` +
-        `• 用户发来的消息会自动转发到这里\n` +
-        `• 回复消息即可回复对应用户\n` +
+        `• 用户发来的消息会进入私有超级群的专属话题\n` +
+        `• 在话题中发消息即可回复对应用户\n` +
         `• 支持文字/图片/视频/文件等\n\n` +
         `📋 可用命令:\n` +
         `/stats - 查看统计\n` +
@@ -737,7 +786,7 @@ async function handleAdminCommand(msg, env, ctx) {
         `/kwlist - 查看敏感词列表\n` +
         `/kwmode <block|warn> - 拦截/警告模式\n` +
         `/help - 显示此帮助\n\n` +
-        `💡 回复任意用户消息即可回复该用户。`
+        `💡 在用户对应的话题中发消息即可回复该用户。`
       );
       break;
 
@@ -915,8 +964,14 @@ function checkBannedKeywords(text) {
  */
 async function getUserCount(env) {
   try {
-    const allUsers = await env.USER_KV.list();
-    return allUsers.keys.length;
+    let count = 0;
+    let cursor;
+    do {
+      const page = await env.USER_KV.list(cursor ? { cursor } : {});
+      count += page.keys.filter(key => /^\d+$/.test(key.name)).length;
+      cursor = page.list_complete ? null : page.cursor;
+    } while (cursor);
+    return count;
   } catch {
     return '未知';
   }

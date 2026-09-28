@@ -4,8 +4,8 @@ Telegram 双向私聊机器人，部署在 Cloudflare Workers 上。
 
 ## 功能
 
-- 用户给机器人发消息 → 自动转发给管理员
-- 管理员回复转发的消息 → 自动发回给对应用户
+- 用户给机器人发消息 → 自动归档到私有超级群中该用户的专属话题
+- 管理员在话题里发消息 → 自动发回给对应用户
 - 真人验证（数学题）防止机器人滥用
 - 敏感词拦截（内置 30+ 关键词，支持自定义添加）
 - 垃圾信息存储（被拦截的消息存入 KV，管理员可随时查看）
@@ -23,6 +23,7 @@ Telegram 双向私聊机器人，部署在 Cloudflare Workers 上。
 | Cloudflare 账号 | 免费注册 [dash.cloudflare.com](https://dash.cloudflare.com) |
 | Bot Token | 在 Telegram 找 [@BotFather](https://t.me/BotFather) 发 `/newbot` 创建，拿到 Token |
 | 管理员 User ID | 找 [@userinfobot](https://t.me/userinfobot) 发 `/start`，拿到纯数字 ID |
+| 私有超级群 | 创建私有群，开启“话题”，将机器人加入并授予管理员的“管理话题”权限 |
 
 ### 2. 克隆项目
 
@@ -38,7 +39,7 @@ Telegram 双向私聊机器人，部署在 Cloudflare Workers 上。
 
 ### 4. 配置环境变量
 
-共需要三个环境变量：
+话题模式需要四个环境变量和一个 KV 绑定：
 
 > 全部在 Cloudflare Dashboard → Worker → 设置 → 变量和密钥 中添加。
 
@@ -46,8 +47,11 @@ Telegram 双向私聊机器人，部署在 Cloudflare Workers 上。
 |--------|------|------|------|
 | `BOT_TOKEN` |  密钥 | Telegram Bot Token | `7234567890:AAHxxxxxxxxxxxxxxxx` |
 | `ADMIN_ID` |  文本 | 管理员 ID | `123456789` |
+| `ADMIN_GROUP_ID` | 文本 | 开启话题的私有超级群 ID，通常以 `-100` 开头 | `-1001234567890` |
 | `WORKER_URL` |  文本 | Worker 访问地址 | `https://tg-double-chat-bot.xxx.workers.dev` |
 | `VERIFY_QUESTIONS` | 文本，可选 | 自定义验证题库，JSON 数组 | 见下方示例 |
+
+首次部署时可以先不填 `ADMIN_GROUP_ID`；完成第 7 步后再填写。
 
 ### 自定义验证问题
 
@@ -67,7 +71,7 @@ Telegram 双向私聊机器人，部署在 Cloudflare Workers 上。
 
 
 
-### 5. 创建 KV 命名空间并绑定(黑名单和垃圾处理，可选)
+### 5. 创建 KV 命名空间并绑定（话题模式必需）
 
 在 Cloudflare Dashboard 上：
 
@@ -76,7 +80,9 @@ Telegram 双向私聊机器人，部署在 Cloudflare Workers 上。
    - 变量名称：`USER_KV`
    - KV 命名空间：选择 `TG_USER_DB`
 
-### 7. 设置 Webhook
+KV 保存用户 ID 与话题 ID 的对应关系。未绑定 `USER_KV` 时，机器人不会创建话题或转发用户消息。
+
+### 6. 设置 Webhook
 
 浏览器访问：
 
@@ -85,6 +91,10 @@ https://你的域名/setup
 ```
 
 看到 `{"ok": true}` 表示 Webhook 注册成功。
+
+### 7. 获取超级群 ID
+
+在超级群中以管理员账号发送 `/chatid`，机器人会回复群 ID。将这个负数填入 `ADMIN_GROUP_ID`，然后重新部署 Worker。机器人必须是群管理员，否则可能收不到话题中的普通消息。
 
 ### 8. 设置菜单按钮
 
@@ -96,7 +106,7 @@ https://你的域名/setcommands
 
 ### 9. 测试
 
-在 Telegram 给机器人发 `/start`，应该收到回复。
+在 Telegram 给机器人发 `/start`，按提示完成验证后发一条消息。超级群应出现以用户名和用户 ID 命名的话题，消息应进入该话题。管理员在话题中直接发消息，用户私聊应收到回复。可以再发一条消息确认复用同一话题。
 
 ---
 
@@ -115,10 +125,11 @@ https://你的域名/setcommands
 | `/kwlist` | 查看敏感词列表 |
 | `/kwmode <block\|warn>` | 切换拦截/警告模式 |
 
-### 两种使用方式
+### 对话方式
 
-- **回复某条转发的用户消息** → 自动把回复内容转发给对应用户
-- **直接发文字** → 模拟用户消息转发给自己（单号测试）
+- 用户只需私聊机器人；文字和常见媒体消息会复制进专属话题。
+- 只有 `ADMIN_ID` 指定的账号在配置的超级群话题中发出的消息会转发给用户。管理员私聊机器人仍可使用管理命令。
+- 普通群话题、其他群成员的消息不会转发给用户。
 
 ---
 
@@ -139,6 +150,7 @@ https://你的域名/setcommands
 ```
 tg-double-chat-bot/
 ├── worker.js         # 机器人主代码
+├── worker.test.mjs   # 本地测试
 ├── wrangler.toml     # Wrangler 配置
 └── README.md         # 本文件
 ```
@@ -153,5 +165,5 @@ A: 先访问 `/webhook-info` 检查 Webhook 状态，再查看 Cloudflare Worker
 **Q: 重新部署后环境变量被清空了？**
 A: WORKER_URL和ADMIN_ID会随之清空，不想的话可以设置成密钥类型。
 
-**Q: KV 里面没有数据？**
-A: KV 只在敏感词触发、封禁/解封、验证通过等操作时才写入。管理员自身操作不会触发写入。
+**Q: KV 里面没有话题映射？**
+A: 用户完成验证并发送第一条正常消息后才会创建话题，KV 中会出现 `user_topic:` 和 `topic_user:` 键。
