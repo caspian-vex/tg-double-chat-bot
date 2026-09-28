@@ -23,7 +23,7 @@ Telegram 双向私聊机器人，部署在 Cloudflare Workers 上。
 | Cloudflare 账号 | 免费注册 [dash.cloudflare.com](https://dash.cloudflare.com) |
 | Bot Token | 在 Telegram 找 [@BotFather](https://t.me/BotFather) 发 `/newbot` 创建，拿到 Token |
 | 管理员 User ID | 找 [@userinfobot](https://t.me/userinfobot) 发 `/start`，拿到纯数字 ID |
-| 私有超级群 | 创建私有群，开启“话题”，将机器人加入并授予管理员的“管理话题”权限 |
+| 私有超级群 | 创建私有群，开启“话题”，将机器人加入并授予管理员的“管理话题”和“删除消息”权限 |
 
 ### 2. 克隆项目
 
@@ -125,6 +125,7 @@ https://你的域名/setcommands
 | `/block <ID>` | 🔨 封禁指定用户 |
 | `/unblock <ID>` | ✅ 解封指定用户 |
 | `/blocklist` | 📋 查看封禁列表 |
+| `/deleteuser <ID>` | 删除该用户话题及话题消息，清除其 KV 数据 |
 | `/addkw <词>` | 添加敏感词 |
 | `/delkw <词>` | 删除敏感词 |
 | `/kwlist` | 查看敏感词列表 |
@@ -135,6 +136,7 @@ https://你的域名/setcommands
 - 用户只需私聊机器人；文字和常见媒体消息会复制进专属话题。
 - 只有 `ADMIN_ID` 指定的账号在配置的超级群话题中发出的消息会转发给用户。管理员私聊机器人仍可使用管理命令。
 - 普通群话题、其他群成员的消息不会转发给用户。
+- 管理员也可在用户的话题中直接发送 `/deleteuser`，无需填写 ID。该命令不会转发给用户；机器人会私聊管理员报告结果。删除会永久移除该话题中的消息，并清除用户资料、验证/封禁状态、话题映射及垃圾箱中该用户的记录。KV 同步后，用户再次联系会重新验证。
 
 ---
 

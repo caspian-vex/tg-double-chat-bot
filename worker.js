@@ -300,6 +300,7 @@ async function setBotCommands(env) {
     { command: 'block', description: '封禁用户，后接用户 ID' },
     { command: 'unblock', description: '解封用户，后接用户 ID' },
     { command: 'blocklist', description: '查看封禁列表' },
+    { command: 'deleteuser', description: '删除用户话题和数据，后接用户 ID' },
     { command: 'addkw', description: '添加敏感词，后接关键词' },
     { command: 'delkw', description: '删除敏感词，后接关键词' },
     { command: 'kwlist', description: '查看敏感词列表' },
@@ -522,6 +523,90 @@ async function syncTopicTitle(env, userKey, topicId, from) {
   }
 }
 
+async function deleteUserTopicAndData(env, userId, topicIdInChat = null) {
+  if (!env.USER_KV || !env.ADMIN_GROUP_ID) {
+    throw new Error('需要配置 USER_KV 和 ADMIN_GROUP_ID');
+  }
+  const id = String(userId);
+  if (!/^[1-9]\d*$/.test(id) || id === String(env.ADMIN_ID)) {
+    throw new Error('用户 ID 无效或为管理员 ID');
+  }
+  const groupId = String(env.ADMIN_GROUP_ID);
+  const userKey = `user_topic:${groupId}:${id}`;
+  const pending = topicCreation.get(userKey);
+  if (pending) await pending;
+
+  const [storedTopic, blockedRaw, verifiedRaw, pendingRaw, spamRaw] = await Promise.all([
+    env.USER_KV.get(userKey),
+    env.USER_KV.get('blocked_users'),
+    env.USER_KV.get('verified_users'),
+    env.USER_KV.get('pending_verification'),
+    env.USER_KV.get(SPAM_KEY),
+  ]);
+  const blocked = blockedRaw ? JSON.parse(blockedRaw) : [];
+  const verified = verifiedRaw ? JSON.parse(verifiedRaw) : [];
+  const verification = pendingRaw ? JSON.parse(pendingRaw) : {};
+  const spam = spamRaw ? JSON.parse(spamRaw) : [];
+  if (!Array.isArray(blocked) || !Array.isArray(verified) || !Array.isArray(spam) ||
+      !verification || Array.isArray(verification) || typeof verification !== 'object') {
+    throw new Error('KV 中的用户数据格式无效，未删除话题');
+  }
+
+  const cachedTopics = [...topicUsers]
+    .filter(([key, value]) => key.startsWith(`${groupId}:`) && String(value) === id)
+    .map(([key]) => key.slice(groupId.length + 1));
+  const topicIds = [...new Set([storedTopic, userTopics.get(userKey), topicIdInChat, ...cachedTopics]
+    .filter(Boolean).map(Number))];
+  if (topicIds.some(topicId => !Number.isSafeInteger(topicId) || topicId <= 0)) {
+    throw new Error('KV 中的话题 ID 无效，未删除数据');
+  }
+  let deletedTopics = 0;
+  for (const topicId of topicIds) {
+    try {
+      await callTelegramApi(env, 'deleteForumTopic', {
+        chat_id: env.ADMIN_GROUP_ID,
+        message_thread_id: topicId,
+      });
+      deletedTopics++;
+    } catch (error) {
+      // 允许重试：话题已被手动删除或上一次清理已删除话题时，仍需清除残留数据。
+      if (!/TOPIC_ID_INVALID|topic not found|message thread not found/i.test(error.message)) throw error;
+    }
+  }
+
+  const remainingSpam = spam.filter(item => String(item.userId) !== id);
+  const operations = [
+    ['blocked_users', env.USER_KV.put('blocked_users', JSON.stringify(blocked.filter(value => String(value) !== id)))],
+    ['verified_users', env.USER_KV.put('verified_users', JSON.stringify(verified.filter(value => String(value) !== id)))],
+    ['pending_verification', env.USER_KV.put('pending_verification', JSON.stringify(Object.fromEntries(
+      Object.entries(verification).filter(([key]) => key !== id))))],
+    [id, env.USER_KV.delete(id)],
+    [userKey, env.USER_KV.delete(userKey)],
+    [`topic_title:${userKey}`, env.USER_KV.delete(`topic_title:${userKey}`)],
+    [SPAM_KEY, remainingSpam.length ? env.USER_KV.put(SPAM_KEY, JSON.stringify(remainingSpam)) : env.USER_KV.delete(SPAM_KEY)],
+    ...topicIds.map(topicId => [
+      `topic_user:${groupId}:${topicId}`,
+      env.USER_KV.delete(`topic_user:${groupId}:${topicId}`),
+    ]),
+  ];
+  const results = await Promise.allSettled(operations.map(([, operation]) => operation));
+
+  blockedUsers.delete(Number(id));
+  verifiedUsers.delete(Number(id));
+  pendingVerification.delete(Number(id));
+  userTopics.delete(userKey);
+  topicTitles.delete(userKey);
+  topicCreation.delete(userKey);
+  for (const topicId of topicIds) topicUsers.delete(`${groupId}:${topicId}`);
+  for (const [messageId, info] of messageUserMap) {
+    if (String(info.userId) === id) messageUserMap.delete(messageId);
+  }
+
+  const failed = results.flatMap((result, index) => result.status === 'rejected' ? [operations[index][0]] : []);
+  if (failed.length) throw new Error(`话题已删除，但 KV 清理失败：${failed.join(', ')}。请重试此命令`);
+  return { topics: deletedTopics, spam: spam.length - remainingSpam.length };
+}
+
 async function handleTopicMessage(msg, env) {
   const topicId = msg.message_thread_id;
   if (!topicId || !env.USER_KV) return;
@@ -530,6 +615,22 @@ async function handleTopicMessage(msg, env) {
   const userId = topicUsers.get(key) || await env.USER_KV.get(`topic_user:${key}`);
   if (!userId) return; // 未关联用户的话题不参与转发
   topicUsers.set(key, userId);
+
+  if (getCommandName(msg.text) === '/deleteuser') {
+    if (msg.text.trim().split(/\s+/).length !== 1) {
+      await sendMessage(env, env.ADMIN_GROUP_ID, '❌ 在用户话题中直接发送 /deleteuser，无需填写 ID。',
+        { message_thread_id: topicId });
+      return;
+    }
+    try {
+      const result = await deleteUserTopicAndData(env, userId, topicId);
+      await sendMessage(env, env.ADMIN_ID,
+        `✅ 已删除用户 #${userId} 的 ${result.topics} 个话题并清除数据（含 ${result.spam} 条垃圾箱记录）。`);
+    } catch (error) {
+      await sendMessage(env, env.ADMIN_ID, `❌ 删除用户 #${userId} 失败：${error.message}`);
+    }
+    return;
+  }
 
   try {
     await callTelegramApi(env, 'copyMessage', {
@@ -826,6 +927,7 @@ async function handleAdminCommand(msg, env, ctx) {
         `/block <ID> - 封禁用户\n` +
         `/unblock <ID> - 解封用户\n` +
         `/blocklist - 查看封禁列表\n` +
+        `/deleteuser <ID> - 删除话题并清除用户数据\n` +
         `/config - 检查话题模式配置\n` +
         `/setcommands - 更新命令菜单\n` +
         `/help - 帮助`
@@ -843,6 +945,7 @@ async function handleAdminCommand(msg, env, ctx) {
         `/block <ID> - 🔨 封禁指定用户\n` +
         `/unblock <ID> - ✅ 解封指定用户\n` +
         `/blocklist - 📋 查看封禁列表\n` +
+        `/deleteuser <ID> - 🗑️ 删除用户话题和数据\n` +
         `/addkw <词> - 添加敏感词\n` +
         `/delkw <词> - 删除敏感词\n` +
         `/kwlist - 查看敏感词列表\n` +
@@ -875,6 +978,21 @@ async function handleAdminCommand(msg, env, ctx) {
       }
       await sendMessage(env, env.ADMIN_ID,
         `⚙️ 话题模式配置\nUSER_KV: ${env.USER_KV ? '已绑定' : '未绑定'}\n${groupStatus}`);
+      break;
+    }
+
+    case '/deleteuser': {
+      if (args.length !== 1 || !/^[1-9]\d*$/.test(args[0])) {
+        await sendMessage(env, env.ADMIN_ID, '❌ 用法: /deleteuser <用户ID>；也可在用户话题中直接发送 /deleteuser');
+        break;
+      }
+      try {
+        const result = await deleteUserTopicAndData(env, args[0]);
+        await sendMessage(env, env.ADMIN_ID,
+          `✅ 已删除用户 #${args[0]} 的 ${result.topics} 个话题并清除数据（含 ${result.spam} 条垃圾箱记录）。`);
+      } catch (error) {
+        await sendMessage(env, env.ADMIN_ID, `❌ 删除用户 #${args[0]} 失败：${error.message}`);
+      }
       break;
     }
 

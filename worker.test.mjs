@@ -5,10 +5,14 @@ import worker from './worker.js';
 const sent = [];
 let nextMessageId = 1;
 let nextTopicId = 5000;
+let failingMethod = null;
 globalThis.fetch = async (url, options) => {
   const method = new URL(url).pathname.split('/').at(-1);
   const payload = JSON.parse(options.body);
   sent.push({ method, ...payload });
+  if (method === failingMethod) {
+    return { json: async () => ({ ok: false, description: 'not enough rights' }) };
+  }
   const result = method === 'createForumTopic'
     ? { message_thread_id: nextTopicId++ }
     : method === 'getChat'
@@ -188,7 +192,7 @@ test('command setup gives the administrator every supported private command', as
   assert.deepEqual(calls[1].scope, { type: 'chat', chat_id: 9999 });
   assert.deepEqual(calls[1].commands.map(item => item.command), [
     'start', 'help', 'config', 'setcommands', 'stats', 'spamlist', 'clearspam', 'block', 'unblock',
-    'blocklist', 'addkw', 'delkw', 'kwlist', 'kwmode',
+    'blocklist', 'deleteuser', 'addkw', 'delkw', 'kwlist', 'kwmode',
   ]);
 });
 
@@ -200,4 +204,78 @@ test('admin can update the menu from Telegram and use commands with a bot suffix
   messages = await send(9999, '/config@test_bot', topicEnv);
   assert.equal(messages.some(message => message.method === 'getChat'), true);
   assert.equal(messages.some(message => /话题模式配置/.test(message.text)), true);
+});
+
+async function verifyAndCreateTopic(userId) {
+  const env = { ...topicEnv, VERIFY_QUESTIONS: JSON.stringify([{ question: '暗号？', answer: '蓝鲸' }]) };
+  await send(userId, '/start', env);
+  await send(userId, '蓝鲸', env);
+  return send(userId, '你好', env);
+}
+
+test('admin private command deletes the topic and all user-specific KV data', async () => {
+  await verifyAndCreateTopic(1004);
+  const topicId = Number(kv.values.get('user_topic:-1001234:1004'));
+  kv.values.set('blocked_users', JSON.stringify([1004, 9998]));
+  kv.values.set('spam_log', JSON.stringify([
+    { userId: 1004, text: 'spam' }, { userId: 9998, text: 'keep' },
+  ]));
+
+  const messages = await send(9999, '/deleteuser 1004', topicEnv);
+  assert.equal(messages.some(message => message.method === 'deleteForumTopic' && message.message_thread_id === topicId), true);
+  assert.equal(messages.some(message => /已删除用户 #1004/.test(message.text)), true);
+  assert.equal(kv.values.has(`user_topic:-1001234:1004`), false);
+  assert.equal(kv.values.has(`topic_user:-1001234:${topicId}`), false);
+  assert.equal(kv.values.has(`topic_title:user_topic:-1001234:1004`), false);
+  assert.equal(kv.values.has('1004'), false);
+  assert.deepEqual(JSON.parse(kv.values.get('verified_users')).includes(1004), false);
+  assert.deepEqual(JSON.parse(kv.values.get('blocked_users')), [9998]);
+  assert.deepEqual(JSON.parse(kv.values.get('spam_log')), [{ userId: 9998, text: 'keep' }]);
+  const next = await send(1004, '再来', topicEnv);
+  assert.equal(next.some(message => /请回答验证问题/.test(message.text)), true);
+});
+
+test('deleting from a topic does not forward the command to the user', async () => {
+  await verifyAndCreateTopic(1005);
+  const topicId = Number(kv.values.get('user_topic:-1001234:1005'));
+  const groupMessage = {
+    chat: { id: -1001234, type: 'supergroup' },
+    from: { id: 9999, first_name: 'Admin' },
+    message_thread_id: topicId,
+    text: '/deleteuser',
+  };
+  let messages = await deliver({ ...groupMessage, from: { id: 8888 } }, topicEnv);
+  assert.deepEqual(messages, []);
+  messages = await deliver(groupMessage, topicEnv);
+  assert.equal(messages.some(message => message.method === 'deleteForumTopic'), true);
+  assert.equal(messages.some(message => message.method === 'copyMessage'), false);
+  assert.equal(messages.some(message => /已删除用户 #1005/.test(message.text)), true);
+  assert.equal(kv.values.has(`user_topic:-1001234:1005`), false);
+});
+
+test('Telegram deletion failure leaves the user data available for retry', async () => {
+  await verifyAndCreateTopic(1006);
+  const topicId = Number(kv.values.get('user_topic:-1001234:1006'));
+  failingMethod = 'deleteForumTopic';
+  try {
+    const messages = await send(9999, '/deleteuser 1006', topicEnv);
+    assert.equal(messages.some(message => /删除用户 #1006 失败/.test(message.text)), true);
+    assert.equal(kv.values.get('user_topic:-1001234:1006'), String(topicId));
+    assert.equal(JSON.parse(kv.values.get('verified_users')).includes(1006), true);
+  } finally {
+    failingMethod = null;
+  }
+});
+
+test('delete command rejects missing IDs and the administrator ID', async () => {
+  let messages = await send(9999, '/deleteuser', topicEnv);
+  assert.equal(messages.some(message => /用法: \/deleteuser/.test(message.text)), true);
+  assert.equal(messages.some(message => message.method === 'deleteForumTopic'), false);
+
+  messages = await send(9999, '/deleteuser 9999', topicEnv);
+  assert.equal(messages.some(message => /用户 ID 无效或为管理员 ID/.test(message.text)), true);
+  assert.equal(messages.some(message => message.method === 'deleteForumTopic'), false);
+
+  messages = await send(8888, '/deleteuser 1006', topicEnv);
+  assert.equal(messages.some(message => message.method === 'deleteForumTopic'), false);
 });
