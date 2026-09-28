@@ -17,6 +17,7 @@
 
 const topicCreation = new Map(); // 同一 Worker 实例中防止并发创建重复话题
 const userTopics = new Map(); // 同一实例内避免 KV 传播延迟导致重复建话题
+const topicTitles = new Map(); // 缓存话题标题，用户名变化时同步
 const topicUsers = new Map(); // 新建话题后立即可供管理员回复使用
 const messageUserMap = new Map(); // 兼容旧版私聊中的管理员回复
 
@@ -280,28 +281,42 @@ async function getWebhookInfo(env) {
   });
 }
 
-/**
- * 设置 Bot 菜单按钮
- * type: 'all_private_chats' → 所有用户私聊都显示同样菜单
- */
 async function setBotCommands(env) {
-  const res = await fetch(
-    `https://api.telegram.org/bot${env.BOT_TOKEN}/setMyCommands`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        commands: [
-          { command: 'start', description: '开始使用 / 验证' },
-          { command: 'help', description: '查看使用帮助' },
-        ],
-        scope: { type: 'all_private_chats' },
-      }),
-    }
-  );
-  return new Response(JSON.stringify(await res.json(), null, 2), {
-    headers: { 'content-type': 'application/json' },
-  });
+  if (!env.BOT_TOKEN || !env.ADMIN_ID) {
+    return new Response('请先设置 BOT_TOKEN 和 ADMIN_ID', { status: 400 });
+  }
+  const userCommands = [
+    { command: 'start', description: '开始使用 / 验证' },
+    { command: 'help', description: '查看使用帮助' },
+  ];
+  const adminCommands = [
+    { command: 'start', description: '查看管理员使用说明' },
+    { command: 'help', description: '查看管理员命令' },
+    { command: 'config', description: '检查群和 KV 配置' },
+    { command: 'stats', description: '查看机器人统计' },
+    { command: 'spamlist', description: '查看拦截消息' },
+    { command: 'clearspam', description: '清空拦截消息' },
+    { command: 'block', description: '封禁用户，后接用户 ID' },
+    { command: 'unblock', description: '解封用户，后接用户 ID' },
+    { command: 'blocklist', description: '查看封禁列表' },
+    { command: 'addkw', description: '添加敏感词，后接关键词' },
+    { command: 'delkw', description: '删除敏感词，后接关键词' },
+    { command: 'kwlist', description: '查看敏感词列表' },
+    { command: 'kwmode', description: '切换 block 或 warn 模式' },
+  ];
+  try {
+    await callTelegramApi(env, 'setMyCommands', {
+      commands: userCommands,
+      scope: { type: 'all_private_chats' },
+    });
+    await callTelegramApi(env, 'setMyCommands', {
+      commands: adminCommands,
+      scope: { type: 'chat', chat_id: Number(env.ADMIN_ID) },
+    });
+    return Response.json({ ok: true, user_commands: userCommands.length, admin_commands: adminCommands.length });
+  } catch (error) {
+    return Response.json({ ok: false, error: error.message }, { status: 502 });
+  }
 }
 
 // ===================== 消息处理核心逻辑 =====================
@@ -429,7 +444,11 @@ async function getOrCreateTopic(env, from) {
   const groupId = String(env.ADMIN_GROUP_ID);
   const userId = String(from.id);
   const userKey = `user_topic:${groupId}:${userId}`;
-  if (userTopics.has(userKey)) return userTopics.get(userKey);
+  if (userTopics.has(userKey)) {
+    const topicId = userTopics.get(userKey);
+    await syncTopicTitle(env, userKey, topicId, from);
+    return topicId;
+  }
   const pending = topicCreation.get(userKey);
   if (pending) return pending;
 
@@ -438,12 +457,13 @@ async function getOrCreateTopic(env, from) {
     if (existing) {
       const topicId = Number(existing);
       userTopics.set(userKey, topicId);
+      await syncTopicTitle(env, userKey, topicId, from);
       return topicId;
     }
 
     const displayName = ([from.first_name, from.last_name].filter(Boolean).join(' ') || from.username || '用户')
       .replace(/\s+/g, ' ').trim();
-    const name = `${displayName.slice(0, 90)} #${userId}`;
+    const name = getTopicTitle(from);
     const result = await callTelegramApi(env, 'createForumTopic', {
       chat_id: env.ADMIN_GROUP_ID,
       name,
@@ -453,6 +473,12 @@ async function getOrCreateTopic(env, from) {
     await env.USER_KV.put(`topic_user:${groupId}:${topicId}`, userId);
     await env.USER_KV.put(userKey, String(topicId));
     userTopics.set(userKey, topicId);
+    topicTitles.set(userKey, name);
+    try {
+      await env.USER_KV.put(`topic_title:${userKey}`, name);
+    } catch (error) {
+      console.error('保存话题标题失败:', error);
+    }
     topicUsers.set(`${groupId}:${topicId}`, userId);
     await sendMessage(env, env.ADMIN_GROUP_ID,
       `👤 ${displayName}\n🆔 ${userId}${from.username ? `\n🔗 @${from.username}` : ''}`,
@@ -464,6 +490,34 @@ async function getOrCreateTopic(env, from) {
     return await creation;
   } finally {
     topicCreation.delete(userKey);
+  }
+}
+
+function getTopicTitle(from) {
+  const username = from.username?.trim();
+  if (username) return `@${username}`;
+  const displayName = [from.first_name, from.last_name].filter(Boolean).join(' ')
+    .replace(/\s+/g, ' ').trim();
+  return (displayName || '用户').slice(0, 120);
+}
+
+async function syncTopicTitle(env, userKey, topicId, from) {
+  const name = getTopicTitle(from);
+  if (topicTitles.get(userKey) === name) return;
+  const titleKey = `topic_title:${userKey}`;
+  try {
+    if (await env.USER_KV.get(titleKey) !== name) {
+      await callTelegramApi(env, 'editForumTopic', {
+        chat_id: env.ADMIN_GROUP_ID,
+        message_thread_id: topicId,
+        name,
+      });
+      await env.USER_KV.put(titleKey, name);
+    }
+    topicTitles.set(userKey, name);
+  } catch (error) {
+    // 改名失败不应阻止消息进入现有话题。
+    console.error('更新话题标题失败:', error);
   }
 }
 

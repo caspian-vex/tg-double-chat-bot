@@ -76,6 +76,7 @@ test('custom question requires its answer even after /start and /help', async ()
   assert.match(messages[0].text, /验证通过/);
   messages = await send(1001, '你好', config);
   assert.equal(messages.filter(message => message.method === 'createForumTopic').length, 1);
+  assert.equal(messages.find(message => message.method === 'createForumTopic').name, 'Tester');
   assert.equal(messages.some(message => message.method === 'copyMessage' && message.chat_id === '-1001234'), true);
 });
 
@@ -97,6 +98,17 @@ test('later messages reuse the topic and only the configured admin can reply', a
   assert.deepEqual(messages, []);
   messages = await deliver({ ...groupMessage, chat: { id: -1009999, type: 'supergroup' } }, topicEnv);
   assert.deepEqual(messages, []);
+});
+
+test('an existing topic switches to the username without an ID', async () => {
+  const messages = await deliver({
+    chat: { id: 1001, type: 'private' },
+    from: { id: 1001, first_name: 'Tester', username: 'alice' },
+    text: '更新用户名',
+  }, topicEnv);
+  assert.equal(messages.some(message => message.method === 'createForumTopic'), false);
+  assert.equal(messages.find(message => message.method === 'editForumTopic').name, '@alice');
+  assert.equal(messages.some(message => message.method === 'copyMessage' && message.message_thread_id === 5000), true);
 });
 
 test('admin can get the supergroup ID before configuring it', async () => {
@@ -162,4 +174,20 @@ test('invalid custom questions do not fall back to default or verify a user', as
   assert.equal(messages.some(message => message.chat_id === 1003 && /验证暂时不可用/.test(message.text)), true);
   assert.equal(messages.some(message => message.chat_id === 1003 && /请回答验证问题/.test(message.text)), false);
   assert.equal(messages.some(message => message.chat_id === '9999' && message.text.includes('VERIFY_QUESTIONS')), true);
+});
+
+test('command setup gives the administrator every supported private command', async () => {
+  const response = await worker.fetch(new Request('https://example.com/setcommands'), {
+    BOT_TOKEN: 'test-token', ADMIN_ID: '9999',
+  });
+  assert.equal(response.status, 200);
+  const calls = sent.splice(0);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].scope.type, 'all_private_chats');
+  assert.deepEqual(calls[0].commands.map(item => item.command), ['start', 'help']);
+  assert.deepEqual(calls[1].scope, { type: 'chat', chat_id: 9999 });
+  assert.deepEqual(calls[1].commands.map(item => item.command), [
+    'start', 'help', 'config', 'stats', 'spamlist', 'clearspam', 'block', 'unblock',
+    'blocklist', 'addkw', 'delkw', 'kwlist', 'kwmode',
+  ]);
 });
