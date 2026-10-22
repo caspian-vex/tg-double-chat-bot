@@ -440,3 +440,77 @@ test('a private-only command typed in a topic is not forwarded to the user', asy
   const status = await send(9999, '/autoreply', topicEnv);
   assert.equal(status.some(message => /当前状态: 开启/.test(message.text)), true);
 });
+
+async function press(data, fromId = 9999, extraEnv = topicEnv) {
+  const waits = [];
+  const env = { BOT_TOKEN: 'test-token', ADMIN_ID: '9999', ...extraEnv };
+  const request = new Request('https://example.com/webhook/test-token', {
+    method: 'POST',
+    body: JSON.stringify({
+      callback_query: {
+        id: 'cb-1',
+        from: { id: fromId, first_name: 'Tester' },
+        data,
+        message: { message_id: 1, chat: { id: fromId, type: 'private' } },
+      },
+    }),
+  });
+  await worker.fetch(request, env, { waitUntil: promise => waits.push(promise) });
+  await Promise.all(waits);
+  return sent.splice(0);
+}
+
+test('/help renders a button menu instead of a command list', async () => {
+  const messages = await send(9999, '/help', topicEnv);
+  const menu = messages.find(message => message.reply_markup);
+  assert.ok(menu, '应带内联键盘');
+  const data = menu.reply_markup.inline_keyboard.flat().map(button => button.callback_data);
+  for (const expected of [
+    'cmd:/stats', 'cmd:/spamlist', 'cmd:/blocklist', 'hint:/block', 'hint:/deleteuser',
+    'cmd:/kwmode block', 'cmd:/kwmode warn', 'cmd:/autoreply on', 'cmd:/autoreply off',
+  ]) {
+    assert.equal(data.includes(expected), true, expected);
+  }
+  assert.match(menu.text, /管理员菜单/);
+  assert.match(menu.text, /敏感词拦截模式/);
+});
+
+test('pressing a menu button runs the same command as typing it', async () => {
+  const messages = await press('cmd:/stats');
+  assert.equal(messages.some(message => message.method === 'answerCallbackQuery'), true);
+  assert.equal(messages.some(message => /统计/.test(message.text)), true);
+});
+
+test('buttons that need an argument only show the usage instead of running', async () => {
+  const messages = await press('hint:/deleteuser');
+  assert.equal(messages.some(message => message.method === 'deleteForumTopic'), false);
+  assert.equal(messages.some(message => /\/deleteuser <用户ID>/.test(message.text)), true);
+});
+
+test('non-admin button presses are refused without running anything', async () => {
+  const messages = await press('cmd:/stats', 8888);
+  const answer = messages.find(message => message.method === 'answerCallbackQuery');
+  assert.equal(answer.show_alert, true);
+  assert.equal(messages.some(message => /统计/.test(message.text || '')), false);
+});
+
+test('the webhook subscribes to button callbacks', async () => {
+  const response = await worker.fetch(new Request('https://example.com/setup'), {
+    BOT_TOKEN: 'test-token', WORKER_URL: 'https://example.com',
+  });
+  assert.equal(response.status, 200);
+  const calls = sent.splice(0);
+  assert.equal(calls[0].method, 'setWebhook');
+  assert.deepEqual(calls[0].allowed_updates, ['message', 'callback_query']);
+});
+
+test('mode and auto reply buttons switch state like the typed commands', async () => {
+  let messages = await press('cmd:/kwmode warn');
+  assert.equal(messages.some(message => /关键词模式已切换为: 警告/.test(message.text)), true);
+  messages = await press('cmd:/autoreply off');
+  assert.equal(kv.values.get('auto_reply'), 'off');
+  messages = await press('cmd:/kwmode block');
+  assert.equal(messages.some(message => /关键词模式已切换为: 拦截/.test(message.text)), true);
+  messages = await press('cmd:/autoreply on');
+  assert.equal(kv.values.get('auto_reply'), 'on');
+});

@@ -305,7 +305,7 @@ async function setupWebhook(env) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         url: webhookUrl,
-        allowed_updates: ['message'],
+        allowed_updates: ['message', 'callback_query'],
         drop_pending_updates: true,
       }),
     }
@@ -413,6 +413,17 @@ async function setBotCommands(env) {
 // ===================== 消息处理核心逻辑 =====================
 
 async function handleUpdate(update, env, ctx) {
+  // 内联按钮回调（/help 菜单等）
+  if (update.callback_query) {
+    if (!env.BOT_TOKEN || !env.ADMIN_ID) return;
+    try {
+      await handleCallbackQuery(update.callback_query, env);
+    } catch (e) {
+      console.error('处理按钮回调出错:', e);
+    }
+    return;
+  }
+
   if (!update.message) return;
 
   const msg = update.message;
@@ -1024,6 +1035,100 @@ async function handleHumanVerification(msg, env, ctx) {
   );
 }
 
+// 需要额外参数的命令：点按钮时只提示用法，不代替管理员填参数
+const COMMAND_USAGE = {
+  '/block': '🔨 封禁用户\n请发送：/block <用户ID>',
+  '/unblock': '✅ 解封用户\n请发送：/unblock <用户ID>',
+  '/deleteuser': '🗑 删除用户\n请发送：/deleteuser <用户ID>\n或直接在该用户的话题里发送 /deleteuser。',
+  '/addkw': '➕ 添加敏感词\n请发送：/addkw <关键词>',
+  '/delkw': '➖ 删除敏感词\n请发送：/delkw <关键词>',
+};
+
+/**
+ * 管理员 /help 的按钮菜单。
+ * 按钮只负责触发，实际执行仍交给 handleAdminCommand，因此与手打命令功能完全一致。
+ */
+function adminHelpMenu() {
+  return {
+    text:
+      '📋 管理员菜单\n\n' +
+      '点下面的按钮即可执行对应命令，效果和直接输入命令一样。\n' +
+      '封禁、删除用户、增删敏感词这类需要参数的命令会给出用法提示。\n\n' +
+      '⌨️ 也可直接输入：\n' +
+      '/stats /spamlist /clearspam /block /unblock /blocklist\n' +
+      '/deleteuser /addkw /delkw /kwlist /kwmode /autoreply /config /setcommands\n\n' +
+      `📌 当前：敏感词${keywordAction === 'block' ? '拦截' : '警告'}模式 · ` +
+      `自动回复${autoReplyEnabled ? '开启' : '关闭'} · ${bannedKeywords.size} 个敏感词\n` +
+      '💡 在用户对应的话题中发消息即可回复该用户。',
+    reply_markup: {
+      inline_keyboard: [
+        [
+          { text: '📊 统计', callback_data: 'cmd:/stats' },
+          { text: '📦 垃圾箱', callback_data: 'cmd:/spamlist' },
+          { text: '🗑 清空垃圾箱', callback_data: 'cmd:/clearspam' },
+        ],
+        [
+          { text: '🔨 封禁', callback_data: 'hint:/block' },
+          { text: '✅ 解封', callback_data: 'hint:/unblock' },
+          { text: '📋 封禁名单', callback_data: 'cmd:/blocklist' },
+        ],
+        [
+          { text: '🗑 删除用户', callback_data: 'hint:/deleteuser' },
+          { text: '⚙️ 配置检查', callback_data: 'cmd:/config' },
+          { text: '🔄 更新菜单', callback_data: 'cmd:/setcommands' },
+        ],
+        [
+          { text: '📋 敏感词列表', callback_data: 'cmd:/kwlist' },
+          { text: '➕ 加敏感词', callback_data: 'hint:/addkw' },
+          { text: '➖ 删敏感词', callback_data: 'hint:/delkw' },
+        ],
+        [
+          { text: '🔨 拦截模式', callback_data: 'cmd:/kwmode block' },
+          { text: '⚠️ 警告模式', callback_data: 'cmd:/kwmode warn' },
+        ],
+        [
+          { text: '🔔 开启自动回复', callback_data: 'cmd:/autoreply on' },
+          { text: '🔕 关闭自动回复', callback_data: 'cmd:/autoreply off' },
+        ],
+      ],
+    },
+  };
+}
+
+/**
+ * 处理内联按钮回调。按钮是命令的入口，执行逻辑复用 handleAdminCommand。
+ */
+async function handleCallbackQuery(query, env) {
+  const answer = extra => callTelegramApi(env, 'answerCallbackQuery', {
+    callback_query_id: query.id,
+    ...extra,
+  });
+  if (String(query.from?.id) !== String(env.ADMIN_ID)) {
+    await answer({ text: '❌ 只有管理员可以使用这些按钮', show_alert: true });
+    return;
+  }
+
+  const [kind, ...rest] = String(query.data || '').split(':');
+  const value = rest.join(':');
+  // 先应答回调，避免按钮一直转圈
+  await answer();
+
+  if (kind === 'hint') {
+    await sendMessage(env, env.ADMIN_ID, COMMAND_USAGE[value] || `请直接输入命令：${value}`);
+    return;
+  }
+  if (kind !== 'cmd' || !value.startsWith('/')) return;
+
+  await handleAdminCommand(
+    {
+      chat: { id: Number(env.ADMIN_ID), type: 'private' },
+      from: { id: Number(env.ADMIN_ID), is_bot: false },
+      text: value,
+    },
+    env
+  );
+}
+
 /**
  * 处理管理员命令
  */
@@ -1052,33 +1157,20 @@ async function handleAdminCommand(msg, env, ctx) {
         `/autoreply <on|off> - 开关自动回复\n` +
         `/config - 检查话题模式配置\n` +
         `/setcommands - 更新命令菜单\n` +
-        `/help - 帮助`
+        `/help - 打开按钮菜单`,
+        {
+          reply_markup: {
+            inline_keyboard: [[{ text: '📋 打开命令菜单', callback_data: 'cmd:/help' }]],
+          },
+        }
       );
       break;
 
-    case '/help':
-      await sendMessage(
-        env,
-        env.ADMIN_ID,
-        `📋 管理员命令:\n\n` +
-        `/stats - 查看机器人统计信息\n` +
-        `/spamlist - 📦 查看拦截的垃圾信息（含用户信息和内容）\n` +
-        `/clearspam - 🗑️ 清空所有已拦截记录\n` +
-        `/block <ID> - 🔨 封禁指定用户\n` +
-        `/unblock <ID> - ✅ 解封指定用户\n` +
-        `/blocklist - 📋 查看封禁列表\n` +
-        `/deleteuser <ID> - 🗑️ 删除用户话题和数据\n` +
-        `/addkw <词> - 添加敏感词\n` +
-        `/delkw <词> - 删除敏感词\n` +
-        `/kwlist - 查看敏感词列表\n` +
-        `/kwmode <block|warn> - 拦截/警告模式\n` +
-        `/autoreply <on|off> - 开关“已发送”自动回复\n` +
-        `/config - 检查群类型、话题与 KV 绑定\n` +
-        `/setcommands - 更新命令菜单\n` +
-        `/help - 显示此帮助\n\n` +
-        `💡 在用户对应的话题中发消息即可回复该用户。`
-      );
+    case '/help': {
+      const menu = adminHelpMenu();
+      await sendMessage(env, env.ADMIN_ID, menu.text, { reply_markup: menu.reply_markup });
       break;
+    }
 
     case '/setcommands': {
       const response = await setBotCommands(env);
