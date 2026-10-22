@@ -25,7 +25,8 @@ const messageUserMap = new Map(); // 兼容旧版私聊中的管理员回复
 const blockedUsers = new Set();        // 被封禁的用户ID
 const verifiedUsers = new Set();       // 已通过真人验证的用户ID
 const pendingVerification = new Map(); // userId → { answer, attempts }
-const bannedKeywords = new Set([    // 敏感关键词列表
+// 内置敏感关键词。匹配时忽略大小写与全角/半角差异，展示时保留这里的原始写法。
+const BUILTIN_KEYWORDS = [
   '加群',
   '进群',
   '推广',
@@ -57,9 +58,59 @@ const bannedKeywords = new Set([    // 敏感关键词列表
   '中间商',
   '交流群',
   '介绍',
-]);
+  '黑产',
+  '福利',
+  '反水',
+  '机器人',
+  '能量',
+  '租赁',
+  '全球',
+  '门槛',
+  '全网',
+  '交流',
+  '专业',
+  '一个群',
+  '全自动',
+  '免费',
+  '采集',
+  'TRX',
+  '自动',
+  '发群',
+  '直出',
+  '机房',
+  '@',
+  '奖池',
+  '大额',
+  'http',
+  '邀请',
+];
+const bannedKeywords = new Map();      // 规范化关键词 → 原始写法，键重复时以先加入的写法为准
+BUILTIN_KEYWORDS.forEach(keyword => addKeyword(keyword));
 let keywordAction = 'block';        // 'block'=拦截, 'warn'=警告+转发
 let dataLoaded = false;             // 是否已从KV加载数据
+
+// ====== 敏感词工具函数 ======
+
+/**
+ * 统一关键词/文本的比较形式：全角转半角、去首尾空白、转小写。
+ * 这样 USDT / usdt / ＵＳＤＴ 会命中同一条规则。
+ */
+function normalizeKeyword(keyword) {
+  return String(keyword ?? '').normalize('NFKC').trim().toLowerCase();
+}
+
+/** 新增关键词；已存在（忽略大小写）时返回 false，保留先加入的原始写法 */
+function addKeyword(keyword) {
+  const key = normalizeKeyword(keyword);
+  if (!key || bannedKeywords.has(key)) return false;
+  bannedKeywords.set(key, String(keyword).trim());
+  return true;
+}
+
+/** 删除关键词（忽略大小写）；不存在时返回 false */
+function removeKeyword(keyword) {
+  return bannedKeywords.delete(normalizeKeyword(keyword));
+}
 
 // ====== KV 持久化辅助函数 ======
 
@@ -88,7 +139,8 @@ async function loadFromKV(env) {
     }
     if (keywordsRaw) {
       const arr = JSON.parse(keywordsRaw);
-      arr.forEach(kw => bannedKeywords.add(kw));
+      // 老 KV 里可能存着内置词的旧写法，addKeyword 会按规范化键去重
+      arr.forEach(kw => addKeyword(kw));
     }
     if (kwActionRaw) {
       keywordAction = kwActionRaw;
@@ -120,7 +172,7 @@ async function savePendingToKV(env) {
 
 async function saveKeywordsToKV(env) {
   if (!env.USER_KV) return;
-  await env.USER_KV.put('banned_keywords', JSON.stringify(Array.from(bannedKeywords)));
+  await env.USER_KV.put('banned_keywords', JSON.stringify(Array.from(bannedKeywords.values())));
 }
 
 async function saveKwActionToKV(env) {
@@ -1146,7 +1198,10 @@ async function handleAdminCommand(msg, env, ctx) {
         await sendMessage(env, env.ADMIN_ID, '❌ 用法: /addkw <关键词>');
         return;
       }
-            bannedKeywords.add(kw);
+      if (!addKeyword(kw)) {
+        await sendMessage(env, env.ADMIN_ID, `⚠️ 敏感词已存在（忽略大小写）: ${escapeHtml(kw)}`);
+        return;
+      }
       await saveKeywordsToKV(env);
       await sendMessage(env, env.ADMIN_ID, `✅ 已添加敏感词: ${escapeHtml(kw)}`);
       break;
@@ -1158,11 +1213,10 @@ async function handleAdminCommand(msg, env, ctx) {
         await sendMessage(env, env.ADMIN_ID, '❌ 用法: /delkw <关键词>');
         return;
       }
-      if (!bannedKeywords.has(kw)) {
+      if (!removeKeyword(kw)) {
         await sendMessage(env, env.ADMIN_ID, `❌ 敏感词不存在: ${escapeHtml(kw)}`);
         return;
       }
-            bannedKeywords.delete(kw);
       await saveKeywordsToKV(env);
       await sendMessage(env, env.ADMIN_ID, `✅ 已删除敏感词: ${escapeHtml(kw)}`);
       break;
@@ -1173,7 +1227,7 @@ async function handleAdminCommand(msg, env, ctx) {
         await sendMessage(env, env.ADMIN_ID, `📋 敏感词列表为空，当前模式: ${keywordAction === 'block' ? '🔨 拦截' : '⚠️ 警告'}`);
         return;
       }
-      const list = Array.from(bannedKeywords).join('\n• ');
+      const list = Array.from(bannedKeywords.values()).join('\n• ');
       await sendMessage(env, env.ADMIN_ID, `📋 敏感词列表 (${keywordAction === 'block' ? '🔨 拦截' : '⚠️ 警告'}):\n• ${list}`);
       break;
     }
@@ -1201,11 +1255,16 @@ async function handleAdminCommand(msg, env, ctx) {
 
 /**
  * 检查消息是否包含敏感词
+ * 匹配前统一转成「全角→半角 + 小写」，因此 USDT/usdt/ＵＳＤＴ 都会命中同一条规则
+ * @returns {string|null} 命中的关键词原始写法
  */
 function checkBannedKeywords(text) {
-  for (const kw of bannedKeywords) {
-    if (text.includes(kw)) {
-      return kw;
+  if (!text) return null;
+  const normalized = normalizeKeyword(text);
+  if (!normalized) return null;
+  for (const [key, original] of bannedKeywords) {
+    if (normalized.includes(key)) {
+      return original;
     }
   }
   return null;

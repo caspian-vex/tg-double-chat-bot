@@ -337,3 +337,48 @@ test('delete command rejects missing IDs and the administrator ID', async () => 
   messages = await send(8888, '/deleteuser 1006', topicEnv);
   assert.equal(messages.some(message => message.method === 'deleteForumTopic'), false);
 });
+
+async function verifiedUser(userId) {
+  const env = { ...topicEnv, VERIFY_QUESTIONS: JSON.stringify([{ question: '暗号？', answer: '蓝鲸' }]) };
+  await send(userId, '/start', env);
+  await send(userId, '蓝鲸', env);
+  return env;
+}
+
+test('keywords match regardless of letter case and full-width characters', async () => {
+  const env = await verifiedUser(1010);
+  let messages = await send(1010, '给我 usdt 地址', env);
+  assert.equal(messages.some(message => /敏感内容/.test(message.text)), true);
+  assert.equal(messages.some(message => message.method === 'copyMessage'), false);
+
+  messages = await send(1010, '看看 ｔｒｘ 行情', env);
+  assert.equal(messages.some(message => /敏感内容/.test(message.text)), true);
+
+  messages = await send(1010, '你好，请问怎么用？', env);
+  assert.equal(messages.some(message => /敏感内容/.test(message.text)), false);
+  assert.equal(messages.some(message => message.method === 'copyMessage'), true);
+});
+
+test('keywords previously added via /addkw are now built in', async () => {
+  const messages = await send(9999, '/kwlist', topicEnv);
+  const text = messages.find(message => /敏感词列表/.test(message.text)).text;
+  for (const keyword of ['USDT', '介绍', '黑产', '机器人', 'TRX', 'http', '@', '奖池', '邀请']) {
+    assert.equal(text.includes(keyword), true, keyword);
+  }
+  assert.equal(text.includes('• usdt'), false, '内置词应保留原始大小写');
+});
+
+test('keyword management treats differently cased input as the same keyword', async () => {
+  let messages = await send(9999, '/addkw usdt', topicEnv);
+  assert.equal(messages.some(message => /已存在/.test(message.text)), true);
+
+  messages = await send(9999, '/addkw TempKw', topicEnv);
+  assert.equal(messages.some(message => /已添加/.test(message.text)), true);
+  messages = await send(9999, '/addkw tempkw', topicEnv);
+  assert.equal(messages.some(message => /已存在/.test(message.text)), true);
+
+  messages = await send(9999, '/delkw TEMPKW', topicEnv);
+  assert.equal(messages.some(message => /已删除/.test(message.text)), true);
+  messages = await send(9999, '/delkw tempkw', topicEnv);
+  assert.equal(messages.some(message => /不存在/.test(message.text)), true);
+});
