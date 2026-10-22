@@ -267,6 +267,39 @@ test('Telegram deletion failure leaves the user data available for retry', async
   }
 });
 
+test('topic deletion accepts the matching user ID and rejects any other ID', async () => {
+  await verifyAndCreateTopic(1007);
+  const topicId = Number(kv.values.get('user_topic:-1001234:1007'));
+  const groupMessage = {
+    chat: { id: -1001234, type: 'supergroup' },
+    from: { id: 9999, first_name: 'Admin' },
+    message_thread_id: topicId,
+  };
+
+  let messages = await deliver({ ...groupMessage, text: '/deleteuser 1004' }, topicEnv);
+  assert.equal(messages.some(message => message.method === 'deleteForumTopic'), false);
+  assert.equal(messages.some(message => message.method === 'copyMessage'), false);
+  assert.equal(messages.some(message => /当前话题属于用户 #1007/.test(message.text)), true);
+  assert.equal(kv.values.get('user_topic:-1001234:1007'), String(topicId));
+
+  messages = await deliver({ ...groupMessage, text: '/deleteuser@test_bot 1007' }, topicEnv);
+  assert.equal(messages.some(message => message.method === 'deleteForumTopic' && message.message_thread_id === topicId), true);
+  assert.equal(messages.some(message => /已删除用户 #1007/.test(message.text)), true);
+  assert.equal(kv.values.has('user_topic:-1001234:1007'), false);
+});
+
+test('a topic without a linked user reports instead of ignoring the delete command', async () => {
+  const messages = await deliver({
+    chat: { id: -1001234, type: 'supergroup' },
+    from: { id: 9999, first_name: 'Admin' },
+    message_thread_id: 4999,
+    text: '/deleteuser',
+  }, topicEnv);
+  assert.equal(messages.some(message => message.method === 'deleteForumTopic'), false);
+  assert.equal(messages.some(message => message.method === 'copyMessage'), false);
+  assert.equal(messages.some(message => /该话题未关联任何用户/.test(message.text)), true);
+});
+
 test('delete command rejects missing IDs and the administrator ID', async () => {
   let messages = await send(9999, '/deleteuser', topicEnv);
   assert.equal(messages.some(message => /用法: \/deleteuser/.test(message.text)), true);

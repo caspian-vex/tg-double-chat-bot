@@ -612,20 +612,38 @@ async function handleTopicMessage(msg, env) {
   if (!topicId || !env.USER_KV) return;
   const groupId = String(env.ADMIN_GROUP_ID);
   const key = `${groupId}:${topicId}`;
+  const isDeleteCommand = getCommandName(msg.text) === '/deleteuser';
   const userId = topicUsers.get(key) || await env.USER_KV.get(`topic_user:${key}`);
-  if (!userId) return; // 未关联用户的话题不参与转发
+  if (!userId) {
+    // 未关联用户的话题不参与转发；但删除命令需要明确告知管理员，避免静默无响应。
+    if (isDeleteCommand) {
+      await sendMessage(env, env.ADMIN_GROUP_ID, '❌ 该话题未关联任何用户，无法删除。',
+        { message_thread_id: topicId });
+    }
+    return;
+  }
   topicUsers.set(key, userId);
 
-  if (getCommandName(msg.text) === '/deleteuser') {
-    if (msg.text.trim().split(/\s+/).length !== 1) {
-      await sendMessage(env, env.ADMIN_GROUP_ID, '❌ 在用户话题中直接发送 /deleteuser，无需填写 ID。',
+  if (isDeleteCommand) {
+    const args = msg.text.trim().split(/\s+/).slice(1);
+    if (args.length > 1) {
+      await sendMessage(env, env.ADMIN_GROUP_ID, '❌ 在用户话题中发送 /deleteuser 即可，无需填写 ID。',
+        { message_thread_id: topicId });
+      return;
+    }
+    const requestedId = args[0]?.replace(/^#/, '');
+    if (requestedId && requestedId !== String(userId)) {
+      await sendMessage(env, env.ADMIN_GROUP_ID,
+        `❌ 当前话题属于用户 #${userId}，不能在此话题中删除 #${requestedId}。\n` +
+        `如需删除该用户，请到他/她自己的话题中发送 /deleteuser，或私聊机器人发送 /deleteuser ${requestedId}。`,
         { message_thread_id: topicId });
       return;
     }
     try {
       const result = await deleteUserTopicAndData(env, userId, topicId);
       await sendMessage(env, env.ADMIN_ID,
-        `✅ 已删除用户 #${userId} 的 ${result.topics} 个话题并清除数据（含 ${result.spam} 条垃圾箱记录）。`);
+        `✅ 已删除用户 #${userId} 的 ${result.topics} 个话题（含话题内消息）并清除数据` +
+        `（含 ${result.spam} 条垃圾箱记录）。`);
     } catch (error) {
       await sendMessage(env, env.ADMIN_ID, `❌ 删除用户 #${userId} 失败：${error.message}`);
     }
