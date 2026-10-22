@@ -306,6 +306,16 @@ async function setBotCommands(env) {
     { command: 'kwlist', description: '查看敏感词列表' },
     { command: 'kwmode', description: '切换 block 或 warn 模式' },
   ];
+  // 管理员超级群内的菜单：只列出话题中真正可用的命令，避免和私聊命令混淆
+  const groupCommands = [
+    { command: 'deleteuser', description: '删除当前话题及该用户数据' },
+  ];
+  const result = {
+    ok: true,
+    user_commands: userCommands.length,
+    admin_commands: adminCommands.length,
+    group_commands: 0,
+  };
   try {
     await callTelegramApi(env, 'setMyCommands', {
       commands: userCommands,
@@ -315,10 +325,26 @@ async function setBotCommands(env) {
       commands: adminCommands,
       scope: { type: 'chat', chat_id: Number(env.ADMIN_ID) },
     });
-    return Response.json({ ok: true, user_commands: userCommands.length, admin_commands: adminCommands.length });
   } catch (error) {
     return Response.json({ ok: false, error: error.message }, { status: 502 });
   }
+
+  // 群菜单依赖 ADMIN_GROUP_ID，失败时只记录原因，不让私聊菜单一起报错
+  const groupId = Number(env.ADMIN_GROUP_ID);
+  if (Number.isFinite(groupId) && groupId < 0) {
+    try {
+      await callTelegramApi(env, 'setMyCommands', {
+        commands: groupCommands,
+        scope: { type: 'chat', chat_id: groupId },
+      });
+      result.group_commands = groupCommands.length;
+    } catch (error) {
+      result.group_error = error.message;
+    }
+  } else {
+    result.group_error = '未设置 ADMIN_GROUP_ID，已跳过群菜单';
+  }
+  return Response.json(result);
 }
 
 // ===================== 消息处理核心逻辑 =====================
@@ -979,7 +1005,9 @@ async function handleAdminCommand(msg, env, ctx) {
       const response = await setBotCommands(env);
       const result = await response.json();
       await sendMessage(env, env.ADMIN_ID, result.ok
-        ? `✅ 命令菜单已更新：普通用户 ${result.user_commands} 项，管理员 ${result.admin_commands} 项。`
+        ? `✅ 命令菜单已更新：普通用户 ${result.user_commands} 项，管理员 ${result.admin_commands} 项，` +
+          `管理群 ${result.group_commands} 项。` +
+          (result.group_error ? `\n⚠️ 群菜单未生效：${result.group_error}` : '')
         : `❌ 更新命令菜单失败：${result.error || '请检查 Worker 日志'}`);
       break;
     }

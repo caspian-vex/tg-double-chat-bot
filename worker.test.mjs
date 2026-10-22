@@ -196,10 +196,35 @@ test('command setup gives the administrator every supported private command', as
   ]);
 });
 
+test('group menu exposes the topic delete command for the admin group', async () => {
+  const response = await worker.fetch(new Request('https://example.com/setcommands'), {
+    BOT_TOKEN: 'test-token', ADMIN_ID: '9999', ADMIN_GROUP_ID: '-1001234',
+  });
+  assert.equal(response.status, 200);
+  const body = await response.json();
+  const calls = sent.splice(0);
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[2].scope, { type: 'chat', chat_id: -1001234 });
+  assert.deepEqual(calls[2].commands.map(item => item.command), ['deleteuser']);
+  assert.equal(body.group_commands, 1);
+  assert.equal(body.group_error, undefined);
+});
+
+test('group menu is skipped with a reason when the group is not configured', async () => {
+  const response = await worker.fetch(new Request('https://example.com/setcommands'), {
+    BOT_TOKEN: 'test-token', ADMIN_ID: '9999',
+  });
+  const body = await response.json();
+  sent.splice(0);
+  assert.equal(body.group_commands, 0);
+  assert.match(body.group_error, /ADMIN_GROUP_ID/);
+});
+
 test('admin can update the menu from Telegram and use commands with a bot suffix', async () => {
-  let messages = await send(9999, '/setcommands');
-  assert.equal(messages.filter(message => message.method === 'setMyCommands').length, 2);
+  let messages = await send(9999, '/setcommands', topicEnv);
+  assert.equal(messages.filter(message => message.method === 'setMyCommands').length, 3);
   assert.equal(messages.some(message => /命令菜单已更新/.test(message.text)), true);
+  assert.equal(messages.some(message => /管理群 1 项/.test(message.text)), true);
 
   messages = await send(9999, '/config@test_bot', topicEnv);
   assert.equal(messages.some(message => message.method === 'getChat'), true);
