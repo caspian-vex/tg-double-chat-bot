@@ -87,6 +87,7 @@ const BUILTIN_KEYWORDS = [
 const bannedKeywords = new Map();      // 规范化关键词 → 原始写法，键重复时以先加入的写法为准
 BUILTIN_KEYWORDS.forEach(keyword => addKeyword(keyword));
 let keywordAction = 'block';        // 'block'=拦截, 'warn'=警告+转发
+let autoReplyEnabled = true;        // 是否在用户发消息后自动回“已发送”提示，可用 /autoreply 开关
 let dataLoaded = false;             // 是否已从KV加载数据
 
 // ====== 敏感词工具函数 ======
@@ -117,12 +118,13 @@ function removeKeyword(keyword) {
 async function loadFromKV(env) {
   if (!env.USER_KV || dataLoaded) return;
   try {
-    const [blockedRaw, verifiedRaw, pendingRaw, keywordsRaw, kwActionRaw] = await Promise.all([
+    const [blockedRaw, verifiedRaw, pendingRaw, keywordsRaw, kwActionRaw, autoReplyRaw] = await Promise.all([
       env.USER_KV.get('blocked_users'),
       env.USER_KV.get('verified_users'),
       env.USER_KV.get('pending_verification'),
       env.USER_KV.get('banned_keywords'),
       env.USER_KV.get('keyword_action'),
+      env.USER_KV.get('auto_reply'),
     ]);
 
     if (blockedRaw) {
@@ -144,6 +146,9 @@ async function loadFromKV(env) {
     }
     if (kwActionRaw) {
       keywordAction = kwActionRaw;
+    }
+    if (autoReplyRaw) {
+      autoReplyEnabled = autoReplyRaw !== 'off';
     }
     dataLoaded = true;
     console.log('✅ 从KV加载数据完成');
@@ -178,6 +183,11 @@ async function saveKeywordsToKV(env) {
 async function saveKwActionToKV(env) {
   if (!env.USER_KV) return;
   await env.USER_KV.put('keyword_action', keywordAction);
+}
+
+async function saveAutoReplyToKV(env) {
+  if (!env.USER_KV) return;
+  await env.USER_KV.put('auto_reply', autoReplyEnabled ? 'on' : 'off');
 }
 
 // ====== 垃圾信息存储 ======
@@ -357,6 +367,7 @@ async function setBotCommands(env) {
     { command: 'delkw', description: '删除敏感词，后接关键词' },
     { command: 'kwlist', description: '查看敏感词列表' },
     { command: 'kwmode', description: '切换 block 或 warn 模式' },
+    { command: 'autoreply', description: '开关消息自动回复' },
   ];
   // 管理员超级群内的菜单：只列出话题中真正可用的命令，避免和私聊命令混淆
   const groupCommands = [
@@ -513,7 +524,9 @@ async function handleUserMessage(msg, env) {
       from_chat_id: msg.chat.id,
       message_id: msg.message_id,
     });
-    await sendMessage(env, userId, '✅ 消息已发送给管理员，请等待回复~');
+    if (autoReplyEnabled) {
+      await sendMessage(env, userId, '✅ 消息已发送给管理员，请等待回复~');
+    }
   } catch (e) {
     console.error('转发用户消息失败:', e);
     await sendMessage(env, userId, '❌ 消息发送失败，请稍后重试。');
@@ -685,6 +698,12 @@ async function deleteUserTopicAndData(env, userId, topicIdInChat = null) {
   return { topics: deletedTopics, spam: spam.length - remainingSpam.length };
 }
 
+// 仅可在私聊中使用的管理命令。在话题里误发时不能当成回复转发给用户，否则会把内部命令泄露出去
+const PRIVATE_ONLY_COMMANDS = new Set([
+  '/stats', '/spamlist', '/clearspam', '/block', '/unblock', '/blocklist',
+  '/addkw', '/delkw', '/kwlist', '/kwmode', '/autoreply', '/config', '/setcommands', '/help', '/start',
+]);
+
 async function handleTopicMessage(msg, env) {
   const topicId = msg.message_thread_id;
   if (!topicId || !env.USER_KV) return;
@@ -725,6 +744,12 @@ async function handleTopicMessage(msg, env) {
     } catch (error) {
       await sendMessage(env, env.ADMIN_ID, `❌ 删除用户 #${userId} 失败：${error.message}`);
     }
+    return;
+  }
+
+  if (PRIVATE_ONLY_COMMANDS.has(getCommandName(msg.text))) {
+    await sendMessage(env, env.ADMIN_GROUP_ID, '❌ 该命令只能在私聊机器人时使用，已阻止转发给用户。',
+      { message_thread_id: topicId });
     return;
   }
 
@@ -1024,6 +1049,7 @@ async function handleAdminCommand(msg, env, ctx) {
         `/unblock <ID> - 解封用户\n` +
         `/blocklist - 查看封禁列表\n` +
         `/deleteuser <ID> - 删除话题并清除用户数据\n` +
+        `/autoreply <on|off> - 开关自动回复\n` +
         `/config - 检查话题模式配置\n` +
         `/setcommands - 更新命令菜单\n` +
         `/help - 帮助`
@@ -1046,6 +1072,7 @@ async function handleAdminCommand(msg, env, ctx) {
         `/delkw <词> - 删除敏感词\n` +
         `/kwlist - 查看敏感词列表\n` +
         `/kwmode <block|warn> - 拦截/警告模式\n` +
+        `/autoreply <on|off> - 开关“已发送”自动回复\n` +
         `/config - 检查群类型、话题与 KV 绑定\n` +
         `/setcommands - 更新命令菜单\n` +
         `/help - 显示此帮助\n\n` +
@@ -1075,7 +1102,9 @@ async function handleAdminCommand(msg, env, ctx) {
         }
       }
       await sendMessage(env, env.ADMIN_ID,
-        `⚙️ 话题模式配置\nUSER_KV: ${env.USER_KV ? '已绑定' : '未绑定'}\n${groupStatus}`);
+        `⚙️ 话题模式配置\nUSER_KV: ${env.USER_KV ? '已绑定' : '未绑定'}\n${groupStatus}\n` +
+        `自动回复: ${autoReplyEnabled ? '开启' : '关闭'}\n` +
+        `敏感词模式: ${keywordAction === 'block' ? '拦截' : '警告'}（${bannedKeywords.size} 个关键词）`);
       break;
     }
 
@@ -1229,6 +1258,28 @@ async function handleAdminCommand(msg, env, ctx) {
       }
       const list = Array.from(bannedKeywords.values()).join('\n• ');
       await sendMessage(env, env.ADMIN_ID, `📋 敏感词列表 (${keywordAction === 'block' ? '🔨 拦截' : '⚠️ 警告'}):\n• ${list}`);
+      break;
+    }
+
+    case '/autoreply': {
+      const value = (args[0] || '').toLowerCase();
+      const status = autoReplyEnabled
+        ? '✅ 当前状态: 开启（用户每发一条消息都会收到“已发送给管理员”提示）'
+        : '🔕 当前状态: 关闭（用户不会收到确认提示，你仍会正常收到消息）';
+      if (!value) {
+        await sendMessage(env, env.ADMIN_ID, `${status}\n\n用法: /autoreply <on|off>`);
+        break;
+      }
+      const parsed = { on: true, 开: true, off: false, 关: false }[value];
+      if (parsed === undefined) {
+        await sendMessage(env, env.ADMIN_ID, '❌ 用法: /autoreply <on|off>');
+        break;
+      }
+      autoReplyEnabled = parsed;
+      await saveAutoReplyToKV(env);
+      await sendMessage(env, env.ADMIN_ID, autoReplyEnabled
+        ? '✅ 自动回复已开启：用户发消息后会收到“已发送给管理员”提示。'
+        : '🔕 自动回复已关闭：用户发消息后不再收到提示，消息仍会进入对应话题。');
       break;
     }
 

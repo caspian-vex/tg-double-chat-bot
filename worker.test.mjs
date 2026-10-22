@@ -192,7 +192,7 @@ test('command setup gives the administrator every supported private command', as
   assert.deepEqual(calls[1].scope, { type: 'chat', chat_id: 9999 });
   assert.deepEqual(calls[1].commands.map(item => item.command), [
     'start', 'help', 'config', 'setcommands', 'stats', 'spamlist', 'clearspam', 'block', 'unblock',
-    'blocklist', 'deleteuser', 'addkw', 'delkw', 'kwlist', 'kwmode',
+    'blocklist', 'deleteuser', 'addkw', 'delkw', 'kwlist', 'kwmode', 'autoreply',
   ]);
 });
 
@@ -381,4 +381,62 @@ test('keyword management treats differently cased input as the same keyword', as
   assert.equal(messages.some(message => /已删除/.test(message.text)), true);
   messages = await send(9999, '/delkw tempkw', topicEnv);
   assert.equal(messages.some(message => /不存在/.test(message.text)), true);
+});
+
+test('the auto reply acknowledgment can be switched off and back on', async () => {
+  const env = await verifiedUser(1012);
+  let messages = await send(1012, '第一条', env);
+  assert.equal(messages.some(message => /已发送给管理员/.test(message.text)), true);
+
+  messages = await send(9999, '/autoreply 关', topicEnv);
+  assert.equal(messages.some(message => /自动回复已关闭/.test(message.text)), true);
+  assert.equal(kv.values.get('auto_reply'), 'off');
+
+  messages = await send(1012, '第二条', env);
+  assert.equal(messages.some(message => /已发送给管理员/.test(message.text)), false);
+  assert.equal(messages.some(message => message.method === 'copyMessage' && message.chat_id === '-1001234'), true);
+
+  messages = await send(9999, '/autoreply', topicEnv);
+  assert.equal(messages.some(message => /当前状态: 关闭/.test(message.text)), true);
+
+  messages = await send(9999, '/autoreply on', topicEnv);
+  assert.equal(messages.some(message => /自动回复已开启/.test(message.text)), true);
+  messages = await send(1012, '第三条', env);
+  assert.equal(messages.some(message => /已发送给管理员/.test(message.text)), true);
+});
+
+test('the auto reply switch survives a fresh Worker instance', async () => {
+  await send(9999, '/autoreply off', topicEnv);
+  const freshWorker = (await import('./worker.js?autoreply-instance')).default;
+  const messages = await deliver({
+    chat: { id: 1012, type: 'private' },
+    from: { id: 1012, first_name: 'Tester' },
+    text: '重启后还要有回执吗',
+  }, topicEnv, freshWorker);
+  assert.equal(messages.some(message => /已发送给管理员/.test(message.text)), false);
+  assert.equal(messages.some(message => message.method === 'copyMessage'), true);
+  await send(9999, '/autoreply on', topicEnv);
+});
+
+test('an invalid auto reply argument is rejected without changing the switch', async () => {
+  const messages = await send(9999, '/autoreply maybe', topicEnv);
+  assert.equal(messages.some(message => /用法: \/autoreply/.test(message.text)), true);
+  const status = await send(9999, '/autoreply', topicEnv);
+  assert.equal(status.some(message => /当前状态: 开启/.test(message.text)), true);
+});
+
+test('a private-only command typed in a topic is not forwarded to the user', async () => {
+  await verifyAndCreateTopic(1013);
+  const topicId = Number(kv.values.get('user_topic:-1001234:1013'));
+  const messages = await deliver({
+    chat: { id: -1001234, type: 'supergroup' },
+    from: { id: 9999, first_name: 'Admin' },
+    message_thread_id: topicId,
+    text: '/autoreply off',
+  }, topicEnv);
+  assert.equal(messages.some(message => message.method === 'copyMessage'), false);
+  assert.equal(messages.some(message => /该命令只能在私聊/.test(message.text)), true);
+  assert.equal(messages.some(message => message.message_thread_id === topicId), true);
+  const status = await send(9999, '/autoreply', topicEnv);
+  assert.equal(status.some(message => /当前状态: 开启/.test(message.text)), true);
 });
